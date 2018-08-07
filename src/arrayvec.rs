@@ -13,7 +13,7 @@ use NODE_SIZE;
 
 pub type StableVec<T> = ArrayVec<T, ArrayBox<T>>;
 
-pub struct ArrayVec<T, B = [T; NODE_SIZE]> {
+pub struct ArrayVec<T, B: Buf<T> = [T; NODE_SIZE]> {
     len: usize,
     buf: ManuallyDrop<B>,
 }
@@ -139,7 +139,7 @@ impl<T, B: Buf<T>> Drop for ArrayVec<T, B> {
     }
 }
 
-pub struct IntoIter<T, B> {
+pub struct IntoIter<T, B: Buf<T>> {
     buf: ManuallyDrop<B>,
     idx: usize,
     len: usize,

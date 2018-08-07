@@ -1,18 +1,19 @@
 
-use std::cmp::Ordering;
+use std::cmp::{self, Ordering};
 use std::collections::BinaryHeap;
+use std::marker::PhantomData;
 use std::ptr;
 
-mod arrayvec;
-use arrayvec::{ArrayVec, StableVec};
+mod node;
 
-// cardinality of the tree
-const NODE_SIZE: usize = 6;
+use node::{NODE_SIZE, Node, CustomBox};
 
 pub struct MvpTree<T, Df> {
     // must be boxed so it has a stable address
-    root: Option<Box<Node<T>>>,
+    root: Option<CustomBox<Node<T>>>,
     dist_fn: Df,
+    len: usize,
+    height: usize,
 }
 
 impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
@@ -20,87 +21,67 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         MvpTree {
             root: None,
             dist_fn,
+            len: 0,
+            height: 0,
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
     pub fn insert(&mut self, mut item: T) {
+        self.len = self.len.checked_add(1).expect("overflow `self.len + 1`");
+
         if let None = self.root {
-            self.root = Some(Box::new(Node::new(item, unsafe { ptr::null() }, 0)));
+            self.root = Some(Node::new_box(item));
+            self.height = 1;
             return;
         }
 
-        let mut node = self.root.as_mut().unwrap();
+        let mut node = &mut **self.root.as_mut().unwrap();
+        let mut depth = 0;
 
         loop {
             assert!(node.len() > 0, "empty node");
 
             if node.is_leaf() && !node.is_full() {
                 // if the target node is a non-full leaf node, just push the item
-                node.items.push(item);
-                return;
+                node.push_item(item);
+                break;
             }
 
-            let distances = match node.get_distances(&item, &self.dist_fn) {
-                Ok(distances) => distances,
-                Err((parent_idx, _)) => {
-                    // recurse into the left child of the found parent
-                    node = &mut node.children[parent_idx];
-                    continue;
-                },
-            };
+            let distances = node.get_distances(&item, &self.dist_fn);
+
+            if let Some(parent_idx) = node.find_parent(&distances) {
+                node = node.child_mut(parent_idx);
+                depth += 1;
+                continue;
+            }
 
             // if the node children is full, recurse into far right child
-            if node.children.len() == NODE_SIZE + 1 {
-                node = &mut node.children[NODE_SIZE + 1];
+            if node.parents_full() {
+                node = node.child_mut(NODE_SIZE + 1);
+                depth += 1;
                 continue;
             }
 
-            let mut dists_clone = distances.clone();
-            dists_clone.sort_unstable();
-            let median_dist = dists_clone[distances.len() / 2];
+            depth += 1;
 
-            // we should have only left children if the node children list isn't full
-            assert!(node.items.len() > node.children.len());
-
-            let mut left = ArrayVec::new();
-            let mut right = ArrayVec::new();
-
-            // drain all items without a child and partition them
-            for (node_item, dist) in node.items.drain_tail(node.children.len())
-                // use the already-calculated distances
-                .zip(distances.iter().skip(node.children.len()))
-            {
-                assert!(node_item.radius.is_none(), "node had a radius but no children");
-                if dist <= median_dist {
-                    left.push(node_item);
-                } else {
-                    right.push(node_item);
-                }
-            }
-
-            let parent_idx = node.items.len();
-            // push a new node item along with its left child nodes
-            node.items.push(NodeItem { radius: Some(median_dist), item, removed: false, });
-            node.children.push(Node::with_items(left, self, parent_idx));
-
-            // if this is the last node, go ahead and push the right child
-            if node.items.len() == NODE_SIZE {
-                node.children.push(Node::with_items(right, self, parent_idx));
-                return;
-            }
-
-            // otherwise, return the rest of the external nodes to the node list without children
-            if node.items.len() + right.len() == NODE_SIZE + 1 {
-                // but if we don't have room for all the external nodes,
-                // pop one and retry inserting it
-                item = right.pop().unwrap();
-                node.items.extend(right);
+            if let Some(item_) = node.add_parent(item, &distances) {
+                item = item_;
                 continue;
             } else {
-                node.items.extend(right);
-                return;
+                break;
             }
         }
+
+        // update the height if it increased
+        self.height = cmp::max(self.height, depth);
     }
 
     pub fn k_nearest(&self, k: usize, item: &T) -> BinaryHeap<Neighbor<T>> {
@@ -110,7 +91,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         if k == 0 { return heap; }
 
         let mut node = if let Some(ref root) = self.root {
-            root
+            &**root
         } else {
             return heap;
         };
@@ -118,12 +99,12 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         heap.reserve_exact(k);
 
         loop {
-            /// Push a `Neighbor` onto the heap, always limiting its size to `k` items
+            // Push a `Neighbor` onto the heap, always limiting its size to `k` items
             let mut push_heap = |item, dist| {
                 // if the heap is full, swap the item onto it only if its distance
                 // is smaller than the current maximum
                 if heap.len() == k {
-                    let mut peek_mut = heap.peak_mut().expect("heap shouldn't be empty");
+                    let mut peek_mut = heap.peek_mut().expect("heap shouldn't be empty");
                     if peek_mut.dist > dist {
                         peek_mut.dist = dist;
                         peek_mut.item = item;
@@ -136,23 +117,24 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
                 }
             };
 
-            match node.get_distances(item, self.dist_fn) {
-                Err((idx, dist)) => {
-                    // we're within radius, recurse into the left child
-                    push_heap(&node.items[idx].item, dist);
-                    node = &node.children[idx];
-                },
-                Ok(distances) => if node.is_full() {
-                    // recurse into the far right child
-                    push_heap(&node.items[NODE_SIZE - 1].item, distances[NODE_SIZE - 1]);
-                    node = &node.children[NODE_SIZE];
-                } else {
-                    //
-                    for (item, dist) in node.items.iter().zip(distances) {
-                        push_heap(item.item, dist);
-                    }
-                    break;
-                },
+            let distances = node.get_distances(item, self.dist_fn);
+            if let Some(idx) = node.find_parent(&distances) {
+                push_heap(&node.items()[idx], distances[idx]);
+                node = node.left(idx);
+                continue;
+            }
+
+            if node.is_full() {
+                let idx = NODE_SIZE as usize - 1;
+                // recurse into the far right child
+                push_heap(&node.items()[idx], distances[idx]);
+                node = node.far_right();
+            } else {
+                //
+                for (item, &dist) in node.items().iter().zip(&distances) {
+                    push_heap(item.item, dist);
+                }
+                break;
             }
         }
 
@@ -161,67 +143,10 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         heap
     }
 
-    pub fn iter(&self) -> Iter<T> {}
-}
-
-struct NodeItem<T> {
-    radius: Option<u64>,
-    item: T,
-    removed: bool,
-}
-
-struct Node<T> {
-    // never empty
-    items: ArrayVec<NodeItem<T>>,
-    children: StableVec<Node<T>>,
-    parent: *const Node<T>,
-    parent_idx: u8,
-}
-
-impl<T> Node<T> {
-    fn new(item: T, parent: *const Node<T>, parent_idx: usize) -> Self {
-        Self::with_items(
-            Some(NodeItem { item, radius: None, removed: false }).into_iter().collect(),
-            parent,
-            parent_idx
-        )
-    }
-
-    fn with_items(items: ArrayVec<NodeItem<T>>, parent: *const Node<T>, parent_idx: usize) -> Self {
-        Node {
-            items, children: Vec::new(), parent, parent_idx: parent_idx as u8,
+    pub fn iter(&self) -> Iter<T> {
+        Iter {
+            dfs: DepthFirst::new(&self.root),
         }
-    }
-
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    fn is_full(&self) -> bool {
-        self.items.len() == NODE_SIZE
-    }
-
-    fn is_leaf(&self) -> bool {
-        self.children.is_empty()
-    }
-
-    /// Get the distances to the items in this node,
-    /// or the index of the node that should become the given item's parent
-    fn get_distances<Df>(&self, item: &T, dist_fn: Df) -> Result<ArrayVec<u64>, (usize, u64)>
-    where Df: Fn(&T, &T) -> u64 {
-        node.items.iter().enumerate()
-            .map(|(idx, node_item)| {
-                let dist = self.dist_fn(&node_item.item, item);
-
-                if let Some(radius) = node_item.radius {
-                    if dist <= radius {
-                        return Err((idx, dist));
-                    }
-                }
-
-                Ok(dist)
-            })
-            .collect::<Result<ArrayVec<u64>, usize>>()
     }
 }
 
@@ -249,5 +174,79 @@ impl<'a, T: 'a> PartialOrd for Neighbor<'a, T> {
 impl<'a, T: 'a> Ord for Neighbor<'a, T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.dist.cmp(other.dist)
+    }
+}
+
+pub struct Iter<'a, T: 'a> {
+    dfs: DepthFirst<T>,
+    _borrow: PhantomData<&'a T>,
+}
+
+impl<'a, T: 'a> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        unsafe {
+            self.dfs.next().as_ref()
+        }
+    }
+}
+
+pub struct IterMut<'a, T: 'a> {
+    dfs: DepthFirst<T>,
+    _borrow: PhantomData<&'a mut T>,
+}
+
+impl<'a, T: 'a> Iterator for IterMut<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<&'a mut T> {
+        unsafe {
+            // cast from `*const` to `*mut` is safe because we hold the borrow to the tree
+            (self.dfs.next() as *mut T).as_mut()
+        }
+    }
+}
+
+struct DepthFirst<T> {
+    // NULLABLE
+    node: *const Node<T>,
+    descend: bool,
+}
+
+impl<T> DepthFirst<T> {
+    fn new(root: &Option<CustomBox<Node<T>>>) -> Self {
+        DepthFirst {
+            node: root.as_ref().map(|r| r),
+            descend: true,
+        }
+    }
+
+    // NULLABLE
+    unsafe fn next(&mut self) -> *const Node<T> {
+        if self.node.is_null() {
+            return self.node;
+        }
+
+        if !self.descend {
+            while let Some((parent, child_idx)) = (*self.node).parent_and_idx() {
+                if child_idx + 1 < parent.children_len() {
+                    self.node = parent.child(child_idx + 1);
+                    self.descend = true;
+                    break;
+                }
+
+                self.node = parent;
+            }
+        }
+
+        if self.descend {
+            while !self.node.is_leaf() {
+                self.node = self.node.child(0);
+            }
+            self.descend = false;
+        }
+
+        self.node
     }
 }
