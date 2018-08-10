@@ -3,6 +3,7 @@ use std::cmp::{self, Ordering};
 use std::collections::BinaryHeap;
 use std::marker::PhantomData;
 use std::ptr;
+use std::slice;
 
 mod node;
 
@@ -55,29 +56,30 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
                 break;
             }
 
+            // all following branches will go deeper or increase tree height
+            depth += 1;
+
             let distances = node.get_distances(&item, &self.dist_fn);
 
             if let Some(parent_idx) = node.find_parent(&distances) {
-                node = node.child_mut(parent_idx);
-                depth += 1;
+                node = unsafe { &mut *(node.child_mut(parent_idx) as *mut _) };
                 continue;
             }
 
             // if the node children is full, recurse into far right child
             if node.parents_full() {
-                node = node.child_mut(NODE_SIZE + 1);
-                depth += 1;
+                node = unsafe { &mut *(node.far_right_child_mut() as *mut _) };
                 continue;
             }
 
-            depth += 1;
-
-            if let Some(item_) = node.add_parent(item, &distances) {
-                item = item_;
-                continue;
+            if node.is_leaf() {
+                node.make_internal(item, &distances);
             } else {
-                break;
+                let distances = node.child(NODE_SIZE as usize).get_distances(&item, &self.dist_fn);
+                node.add_parent(item, &distances);
             }
+
+            break;
         }
 
         // update the height if it increased
@@ -117,10 +119,10 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
                 }
             };
 
-            let distances = node.get_distances(item, self.dist_fn);
+            let distances = node.get_distances(item, &self.dist_fn);
             if let Some(idx) = node.find_parent(&distances) {
                 push_heap(&node.items()[idx], distances[idx]);
-                node = node.left(idx);
+                node = node.child(idx);
                 continue;
             }
 
@@ -128,11 +130,11 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
                 let idx = NODE_SIZE as usize - 1;
                 // recurse into the far right child
                 push_heap(&node.items()[idx], distances[idx]);
-                node = node.far_right();
+                node = node.child(NODE_SIZE as usize);
             } else {
                 //
                 for (item, &dist) in node.items().iter().zip(&distances) {
-                    push_heap(item.item, dist);
+                    push_heap(item, dist);
                 }
                 break;
             }
@@ -146,6 +148,16 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     pub fn iter(&self) -> Iter<T> {
         Iter {
             dfs: DepthFirst::new(&self.root),
+            items: [].iter(),
+            _borrow: PhantomData,
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> IterMut<T> {
+        IterMut {
+            dfs: DepthFirst::new(&self.root),
+            items: [].iter_mut(),
+            _borrow: PhantomData,
         }
     }
 }
@@ -173,12 +185,13 @@ impl<'a, T: 'a> PartialOrd for Neighbor<'a, T> {
 
 impl<'a, T: 'a> Ord for Neighbor<'a, T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.dist.cmp(other.dist)
+        self.dist.cmp(&other.dist)
     }
 }
 
 pub struct Iter<'a, T: 'a> {
     dfs: DepthFirst<T>,
+    items: slice::Iter<'a, T>,
     _borrow: PhantomData<&'a T>,
 }
 
@@ -186,14 +199,22 @@ impl<'a, T: 'a> Iterator for Iter<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<&'a T> {
-        unsafe {
-            self.dfs.next().as_ref()
+        if self.items.len() == 0 {
+            unsafe {
+                let next_node = self.dfs.next();
+                if !next_node.is_null() {
+                    self.items = (*next_node).items().iter()
+                }
+            }
         }
+
+        self.items.next()
     }
 }
 
 pub struct IterMut<'a, T: 'a> {
     dfs: DepthFirst<T>,
+    items: slice::IterMut<'a, T>,
     _borrow: PhantomData<&'a mut T>,
 }
 
@@ -201,10 +222,16 @@ impl<'a, T: 'a> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<&'a mut T> {
-        unsafe {
-            // cast from `*const` to `*mut` is safe because we hold the borrow to the tree
-            (self.dfs.next() as *mut T).as_mut()
+        if self.items.len() == 0 {
+            unsafe {
+                let next_node = self.dfs.next() as *mut Node<T>;
+                if !next_node.is_null() {
+                    self.items = (*next_node).items_mut().iter_mut()
+                }
+            }
         }
+
+        self.items.next()
     }
 }
 
@@ -217,7 +244,7 @@ struct DepthFirst<T> {
 impl<T> DepthFirst<T> {
     fn new(root: &Option<CustomBox<Node<T>>>) -> Self {
         DepthFirst {
-            node: root.as_ref().map(|r| r),
+            node: root.as_ref().map_or(ptr::null(), |r| &**r),
             descend: true,
         }
     }
@@ -241,8 +268,8 @@ impl<T> DepthFirst<T> {
         }
 
         if self.descend {
-            while !self.node.is_leaf() {
-                self.node = self.node.child(0);
+            while !(*self.node).is_leaf() {
+                self.node = (*self.node).child(0);
             }
             self.descend = false;
         }
