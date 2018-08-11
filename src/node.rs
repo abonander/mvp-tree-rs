@@ -75,7 +75,7 @@ impl<T> Node<T> {
         
         unsafe {
             Self::init_inplace(&mut children[0]);
-            Self::init_inplace(&mut children[NODE_SIZE as usize + 1]);
+            Self::init_inplace(&mut children[NODE_SIZE as usize]);
         }
         
         for i in 0 .. NODE_SIZE as usize {
@@ -85,7 +85,7 @@ impl<T> Node<T> {
             if distances[i] <= radius {
                 children[0].push_item(item);
             } else {
-                children[NODE_SIZE as usize + 1].push_item(item);
+                children[NODE_SIZE as usize].push_item(item);
             }
         }
 

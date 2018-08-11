@@ -48,6 +48,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         let mut depth = 0;
 
         loop {
+            println!("depth {}", depth);
             assert!(node.len() > 0, "empty node");
 
             if node.is_leaf() && !node.is_full() {
@@ -75,7 +76,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
             if node.is_leaf() {
                 node.make_internal(item, &distances);
             } else {
-                let distances = node.child(NODE_SIZE as usize).get_distances(&item, &self.dist_fn);
+                let distances = node.far_right_child().get_distances(&item, &self.dist_fn);
                 node.add_parent(item, &distances);
             }
 
@@ -275,5 +276,32 @@ impl<T> DepthFirst<T> {
         }
 
         self.node
+    }
+}
+
+#[cfg(test)]
+fn compare(left: &u32, right: &u32) -> u64 {
+    (left ^ right).count_ones() as u64
+}
+
+#[test]
+fn constructs() {
+    let _ = MvpTree::new(compare);
+}
+
+#[test]
+fn builds() {
+    let mut tree = MvpTree::new(compare);
+
+    let mut accum = 1;
+
+    for i in 0 .. 10 {
+        println!("pushing {}", accum);
+        tree.insert(accum);
+        accum += 10;
+        println!("pushing {}", accum);
+        tree.insert(accum);
+        accum -= 10;
+        accum += 1;
     }
 }
