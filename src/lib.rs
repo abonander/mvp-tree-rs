@@ -70,12 +70,9 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
             // if the node children is full, recurse into far right child
             if node.parents_full() {
                 node = unsafe { &mut *(node.far_right_child_mut() as *mut _) };
-                continue;
-            }
-
-            if node.is_leaf() {
+            } else if node.is_leaf() {
                 node.make_internal(item, &distances);
-            } else {
+            } else if node.far_right_child().is_full() {
                 let distances = node.far_right_child().get_distances(&item, &self.dist_fn);
                 node.add_parent(item, &distances);
             }
