@@ -48,7 +48,6 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         let mut depth = 0;
 
         loop {
-            println!("depth {}", depth);
             assert!(node.len() > 0, "empty node");
 
             if node.is_leaf() && !node.is_full() {
@@ -324,15 +323,24 @@ fn empty_tree() {
 }
 
 #[test]
-fn builds() {
+fn one_level() {
     let mut tree = MvpTree::new(compare);
 
-    let mut accum = 1;
+    tree.extend(0 .. 6);
 
-    for i in 0 .. 10 {
-        println!("pushing {}", accum);
-        tree.insert(accum);
-        // multiply by an odd number and mod by an even number
-        accum = (accum * 32) % 29;
-    }
+    assert_eq!(tree.len(), 6);
+    assert_eq!(tree.height(), 1);
+
+    assert_eq!(
+        tree.iter().cloned().collect::<Vec<_>>(),
+        (0 .. 6).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_100() {
+    let mut tree = MvpTree::new(compare);
+    tree.extend(0 .. 100);
+    assert_eq!(tree.len(), 100);
+    assert_eq!(tree.height(), 10);
 }
