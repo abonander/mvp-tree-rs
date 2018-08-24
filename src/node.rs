@@ -5,10 +5,11 @@ use std::ptr::{self, NonNull};
 
 // cardinality of the tree
 // the `u8` type saves memory as our values never exceed NODE_SIZE + 1
-pub const NODE_SIZE: u8 = 6;
+pub const NODE_SIZE: usize = 6;
+pub const CHILD_SIZE: usize = NODE_SIZE + 1;
 
-pub type NodeArray<T> = [T; NODE_SIZE as usize];
-pub type ChildArray<T> = [Node<T>; NODE_SIZE as usize + 1];
+pub type NodeArray<T> = [T; NODE_SIZE];
+pub type ChildArray<T> = [Node<T>; CHILD_SIZE];
 pub type Distances = NodeArray<u64>;
 
 struct NodeItem<T> {
@@ -27,7 +28,7 @@ pub struct Node<T> {
     radii: Distances,
     children: Option<CustomBox<ChildArray<T>>>,
     parent: *const Node<T>,
-    child_idx: u8,
+    parent_idx: u8,
 }
 
 impl<T> Node<T> {
@@ -47,13 +48,13 @@ impl<T> Node<T> {
         this.radii = [0u64; NODE_SIZE as usize];
         this.parents_len = 0;
         this.parent = ptr::null_mut();
-        this.child_idx = 0;
+        this.parent_idx = 0;
         this.children = None;
         this
     }
 
     pub fn push_item(&mut self, item: T) {
-        assert!(self.items_len < NODE_SIZE, "pushing to a full node");
+        assert!((self.items_len as usize) < NODE_SIZE, "pushing to a full node");
         unsafe {
             ptr::write(&mut self.items[self.items_len as usize], item);
         }
@@ -64,7 +65,7 @@ impl<T> Node<T> {
     /// and distances from it to the current elements of the node (given by `get_distances`
     #[must_use="ejected item from full node that needs to be reinserted"]
     pub fn make_internal(&mut self, mut item: T, distances: &Distances) {
-        assert_eq!(self.items_len, NODE_SIZE, "trying to add a parent to a non-full node");
+        assert_eq!((self.items_len as usize), NODE_SIZE, "trying to add a parent to a non-full node");
         assert!(self.is_leaf(), "attempting to add parent to non-leaf node");
         
         self.items_len = 0;
@@ -99,9 +100,9 @@ impl<T> Node<T> {
     }
     
     pub fn add_parent(&mut self, item: T, child_distances: &Distances) {
-        assert_eq!(self.far_right_child().items_len, NODE_SIZE, 
+        assert_eq!(self.far_right_child().items_len as usize, NODE_SIZE,
                    "attempting to add parent with non-full right child");
-        assert!(self.parents_len < NODE_SIZE, "attempting to add parent to full node");
+        assert!((self.parents_len as usize) < NODE_SIZE, "attempting to add parent to full node");
         
         self.push_item(item);
 
@@ -123,7 +124,7 @@ impl<T> Node<T> {
     }
     
     fn drain_less_than(&mut self, radius: u64, distances: &Distances, drain_to: &mut Self) {
-        assert_eq!(self.items_len, NODE_SIZE, "attempting to drain from non-full node");
+        assert_eq!(self.items_len as usize, NODE_SIZE, "attempting to drain from non-full node");
         assert_eq!(drain_to.items_len, 0, "attempting to drain to non-empty node");
 
         self.items_len = 0;
@@ -144,21 +145,16 @@ impl<T> Node<T> {
     }
 
     pub fn is_full(&self) -> bool {
-        self.items_len == NODE_SIZE
+        self.items_len as usize == NODE_SIZE
     }
 
     pub fn parents_full(&self) -> bool {
-        self.parents_len == NODE_SIZE
+        self.parents_len as usize == NODE_SIZE
     }
 
+    /// Does *not* include the far-right child
     pub fn children_len(&self) -> usize {
-        // if the parents list is full then we have n + 1 children
-        (if self.parents_len == NODE_SIZE {
-            NODE_SIZE + 1
-        } else {
-            // n children otherwise
-            self.parents_len
-        }) as usize
+        self.parents_len as usize
     }
 
     pub fn is_leaf(&self) -> bool {
@@ -204,14 +200,27 @@ impl<T> Node<T> {
     fn children_mut(&mut self) -> &mut ChildArray<T> {
         self.children.as_mut().expect("node children not allocated")
     }
-     
+
+    pub fn has_parent(&self) -> bool {
+        !self.parent.is_null()
+    }
+
+    pub fn parent_ptr(&self) -> *const Node<T> {
+        self.parent
+    }
+
+    pub fn parent_idx(&self) -> usize {
+        assert!(self.has_parent(), "parent idx of root node makes no sense");
+        self.parent_idx as usize
+    }
+
     /// # Safety
     /// Must ensure parent isn't being modified
     pub unsafe fn parent_and_idx(&self) -> Option<(&Node<T>, usize)> {
         if self.parent.is_null() {
             None
         } else {
-            Some((&*self.parent, self.child_idx as usize))
+            Some((&*self.parent, self.parent_idx as usize))
         }
     }
 
@@ -232,9 +241,12 @@ impl<T> Node<T> {
         dists
     }
 
+    pub fn radii(&self) -> &[u64] {
+        &self.radii[..self.parents_len as usize]
+    }
+
     pub fn find_parent(&self, distances: &Distances) -> Option<usize> {
-        self.radii[..self.parents_len as usize].iter().zip(&distances[..])
-            .position(|(rad, dist)| dist <= rad)
+        self.radii.iter().zip(&distances[..]).position(|(rad, dist)| dist <= rad)
     }
 }
 

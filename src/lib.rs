@@ -2,7 +2,7 @@
 use std::cmp::{self, Ordering};
 use std::collections::BinaryHeap;
 use std::marker::PhantomData;
-use std::ptr;
+use std::ptr::{self, NonNull};
 use std::slice;
 
 mod node;
@@ -84,63 +84,26 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         self.height = cmp::max(self.height, depth);
     }
 
-    pub fn k_nearest(&self, k: usize, item: &T) -> BinaryHeap<Neighbor<T>> {
-        // don't allocate if the tree is empty
-        let mut heap = BinaryHeap::new();
+    pub fn k_nearest<'a>(&'a self, k: usize, item: &T) -> Vec<Neighbor<'a, T>> {
+        if k == 0 { return vec![]; }
 
-        if k == 0 { return heap; }
-
-        let mut node = if let Some(ref root) = self.root {
-            &**root
-        } else {
-            return heap;
+        let root = match self.root {
+            Some(ref root) => root,
+            None => return vec![],
         };
 
-        heap.reserve_exact(k);
+        // don't allocate if the tree is empty
+        let mut neighbors = BinaryHeap::with_capacity(k);
 
-        loop {
-            // Push a `Neighbor` onto the heap, always limiting its size to `k` items
-            let mut push_heap = |item, dist| {
-                // if the heap is full, swap the item onto it only if its distance
-                // is smaller than the current maximum
-                if heap.len() == k {
-                    let mut peek_mut = heap.peek_mut().expect("heap shouldn't be empty");
-                    if peek_mut.dist > dist {
-                        peek_mut.dist = dist;
-                        peek_mut.item = item;
-                    }
-                    // `peek_mut` sifts the item down on-drop
-                } else {
-                    heap.push(Neighbor {
-                        item, dist, _compat: (),
-                    })
-                }
-            };
+        let mut visitor = KnnVisitor {
+            neighbors, item, k, dist_fn: &self.dist_fn,
+        };
 
-            let distances = node.get_distances(item, &self.dist_fn);
-            if let Some(idx) = node.find_parent(&distances) {
-                push_heap(&node.items()[idx], distances[idx]);
-                node = node.child(idx);
-                continue;
-            }
-
-            if node.is_full() {
-                let idx = NODE_SIZE as usize - 1;
-                // recurse into the far right child
-                push_heap(&node.items()[idx], distances[idx]);
-                node = node.child(NODE_SIZE as usize);
-            } else {
-                //
-                for (item, &dist) in node.items().iter().zip(&distances) {
-                    push_heap(item, dist);
-                }
-                break;
-            }
-        }
+        visitor.visit(root);
 
         // FIXME: I'm pretty sure we're supposed to hit other nodes if the heap isn't full yet
 
-        heap
+        visitor.neighbors.into_sorted_vec()
     }
 
     pub fn iter(&self) -> Iter<T> {
@@ -200,9 +163,7 @@ impl<'a, T: 'a> Iterator for Iter<'a, T> {
         if self.items.len() == 0 {
             unsafe {
                 let next_node = self.dfs.next();
-                if !next_node.is_null() {
-                    self.items = (*next_node).items().iter()
-                }
+                self.items = next_node.as_ref()?.items().iter();
             }
         }
 
@@ -223,9 +184,7 @@ impl<'a, T: 'a> Iterator for IterMut<'a, T> {
         if self.items.len() == 0 {
             unsafe {
                 let next_node = self.dfs.next() as *mut Node<T>;
-                if !next_node.is_null() {
-                    self.items = (*next_node).items_mut().iter_mut()
-                }
+                self.items = next_node.as_mut()?.items_mut().iter_mut();
             }
         }
 
@@ -276,9 +235,74 @@ impl<T> DepthFirst<T> {
     }
 }
 
+struct KnnVisitor<'i, 'n, T: 'i + 'n, Df> {
+    item: &'i T,
+    dist_fn: Df,
+    neighbors: BinaryHeap<Neighbor<'n, T>>,
+    k: usize,
+}
+
+impl<'i, 'n, T: 'i + 'n, Df> KnnVisitor<'i, 'n, T, Df> where Df: Fn(&T, &T) -> u64 {
+    /// Push a `Neighbor` onto the heap, always limiting its size to `k` items
+    fn push_heap(&mut self, item: &'n T, dist: u64) {
+        if ptr::eq(item, self.item) { return }
+
+        // if the heap is full, swap the item onto it only if its distance
+        // is smaller than the current maximum
+        if self.neighbors.len() == self.k {
+            let mut peek_mut = self.neighbors.peek_mut().expect("heap shouldn't be empty");
+            if peek_mut.dist > dist {
+                peek_mut.dist = dist;
+                peek_mut.item = item;
+            }
+            // `peek_mut` sifts the item down on-drop
+        } else {
+            self.neighbors.push(Neighbor {
+                item, dist, _compat: (),
+            })
+        }
+    }
+
+    fn visit(&mut self, node: &'n Node<T>) {
+        let distances = node.get_distances(self.item, &self.dist_fn);
+
+        let items_dists = node.items().iter().zip(&distances);
+
+        if node.is_leaf() {
+            for (item, &dist) in items_dists {
+                self.push_heap(item, dist);
+            }
+        } else {
+            for (idx, ((item, &dist), &radius)) in items_dists.zip(node.radii()).enumerate() {
+                if dist <= radius {
+                    self.push_heap(item, dist);
+                    self.visit(node.child(idx));
+
+                    // if we haven't reached `k` neighbors or the farthest neighbor is further
+                    // than `|dist - radius|`, attempt to visit the next child in line
+                    let max_dist = self.neighbors.peek().map_or(0, |n| n.dist);
+                    if self.neighbors.len() == self.k && max_dist < pos_diff(dist, radius) {
+                        return;
+                    }
+                }
+            }
+
+            self.visit(node.far_right_child());
+        }
+    }
+}
+
+fn pos_diff(left: u64, right: u64) -> u64 {
+    if left < right {
+        right - left
+    } else {
+        left - right
+    }
+}
+
 #[cfg(test)]
-fn compare(left: &u32, right: &u32) -> u64 {
-    (left ^ right).count_ones() as u64
+fn compare(left: &u64, right: &u64) -> u64 {
+    pos_diff(*left, *right)
 }
 
 #[test]
@@ -295,10 +319,7 @@ fn builds() {
     for i in 0 .. 10 {
         println!("pushing {}", accum);
         tree.insert(accum);
-        accum += 10;
-        println!("pushing {}", accum);
-        tree.insert(accum);
-        accum -= 10;
-        accum += 1;
+        // multiply by an odd number and mod by an even number
+        accum = (accum * 32) % 29;
     }
 }
