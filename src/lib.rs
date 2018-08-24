@@ -123,6 +123,14 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     }
 }
 
+impl<T, Df> Extend<T> for MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
+    fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) {
+        for item in iter {
+            self.insert(item);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Neighbor<'a, T: 'a> {
     pub dist: u64,
@@ -306,8 +314,13 @@ fn compare(left: &u64, right: &u64) -> u64 {
 }
 
 #[test]
-fn constructs() {
-    let _ = MvpTree::new(compare);
+fn empty_tree() {
+    let mut tree = MvpTree::new(compare);
+
+    assert_eq!(tree.len(), 0);
+    assert_eq!(tree.height(), 0);
+    assert_eq!(tree.iter().collect::<Vec<_>>(), Vec::<&u64>::new());
+    assert_eq!(tree.iter_mut().collect::<Vec<_>>(), Vec::<&u64>::new());
 }
 
 #[test]
