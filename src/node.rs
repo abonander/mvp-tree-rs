@@ -1,135 +1,145 @@
 use std::alloc::{self, Layout};
-use std::mem::ManuallyDrop;
+use std::mem::{self, ManuallyDrop};
 use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::iter::Enumerate;
+use std::slice;
 
 // cardinality of the tree
 // the `u8` type saves memory as our values never exceed NODE_SIZE + 1
-pub const NODE_SIZE: usize = 6;
+pub const NODE_SIZE: usize = 5;
 pub const CHILD_SIZE: usize = NODE_SIZE + 1;
 
 pub type NodeArray<T> = [T; NODE_SIZE];
-pub type ChildArray<T> = [Node<T>; CHILD_SIZE];
+pub type ChildArray<T> = [*mut Node<T>; CHILD_SIZE];
 pub type Distances = NodeArray<u64>;
 
-struct NodeItem<T> {
-    radius: Option<u64>,
-    item: T,
-    removed: bool,
-}
+// FIXME: replace with a smaller atomic type when stable
+type AtomicBitSet = AtomicUsize;
 
 pub struct Node<T> {
-    // never empty
+    /// valid up to `len`
     items: ManuallyDrop<NodeArray<T>>,
-    items_len: u8,
-    removed: NodeArray<bool>,
-    parents_len: u8,
-    // these two only valid up to `num_parents`
+    len: u8,
+    /// valid up to `len`
+    removed: AtomicBitSet,
+    is_leaf: bool,
+    /// if `!is_leaf`, `0 .. len` and `NODE_SIZE` indices are initialized
+    children: ChildArray<T>,
+    /// valid up to `len` if `!is_leaf`
     radii: Distances,
-    children: Option<CustomBox<ChildArray<T>>>,
     parent: *const Node<T>,
-    parent_idx: u8,
+    /// the index of this node in its parent, if applicable
+    child_idx: u8,
 }
 
 impl<T> Node<T> {
-    pub fn new_box(item: T) -> CustomBox<Self> {
+    /// `Box` is necessary for stable addressing so parent pointers work as expected
+    /// An item is required so we never have empty nodes
+    pub fn new_box(item: T) -> Box<Self> {
+        // FIXME: use `MaybeUninit` when stable to avoid copying garbage data
+        let mut items = ManuallyDrop::new(unsafe { mem::zeroed() });
+
         unsafe {
-            let mut node = CustomBox::<Self>::alloc();
-            Self::init_inplace(&mut *node).push_item(item);
-            node
-
+            ptr::write(&mut items[0], item);
         }
+
+        Box::new(Node {
+            items,
+            len: 1,
+            removed: Default::default(),
+            is_leaf: true,
+            children: [ptr::null_mut(); CHILD_SIZE],
+            radii: [0; NODE_SIZE],
+            parent: ptr::null_mut(),
+            child_idx: 0,
+        })
     }
 
-    unsafe fn init_inplace<'a>(this: *mut Self) -> &'a mut Self {
-        let mut this = &mut *this;
-        this.items_len = 0;
-        this.removed = [false; NODE_SIZE as usize];
-        this.radii = [0u64; NODE_SIZE as usize];
-        this.parents_len = 0;
-        this.parent = ptr::null_mut();
-        this.parent_idx = 0;
-        this.children = None;
-        this
+    fn new_child(item: T, parent: *const Self, child_idx: u8) -> *mut Self {
+        let mut node = Self::new_box(item);
+        node.parent = parent;
+        node.child_idx = child_idx;
+        Box::into_raw(node)
     }
 
+    /// For sanity, only allows pushing to a leaf node
     pub fn push_item(&mut self, item: T) {
-        assert!((self.items_len as usize) < NODE_SIZE, "pushing to a full node");
-        unsafe {
-            ptr::write(&mut self.items[self.items_len as usize], item);
-        }
-        self.items_len += 1;
+        assert!(self.is_leaf(), "pushing item to internal node");
+        unsafe { self.unsafe_push_item(item) }
+    }
+
+    /// `self.children[..self.len()]` must be valid before this is called
+    unsafe fn unsafe_push_item(&mut self, item: T) {
+        let len = self.len();
+        assert!(len < NODE_SIZE, "pushing to a full node");
+        // not actually unsafe; destination is valid though uninitialized
+        ptr::write(&mut self.items[len], item);
+        self.len += 1;
     }
 
     /// Repartition the leaf elements of this full node given the new item
-    /// and distances from it to the current elements of the node (given by `get_distances`
+    /// and distances from it to the current elements of the node (given by `get_distances`)
     #[must_use="ejected item from full node that needs to be reinserted"]
     pub fn make_internal(&mut self, mut item: T, distances: &Distances) {
-        assert_eq!((self.items_len as usize), NODE_SIZE, "trying to add a parent to a non-full node");
-        assert!(self.is_leaf(), "attempting to add parent to non-leaf node");
-        
-        self.items_len = 0;
+        assert!(self.is_leaf(), "attempting to make internal node internal again");
+        assert_eq!(self.len(), NODE_SIZE, "trying to make non-full leaf node internal");
+
+        self.len = 0;
         
         let radius = get_median(distances);
+
+        self.children[0] = Self::new_child(item, self, 0);
+        self.children[NODE_SIZE] = Self::new_child(item, self, NODE_SIZE as u8);
         
-        let mut children = self.children.get_or_insert_with(|| unsafe { CustomBox::alloc() });
-        
-        unsafe {
-            Self::init_inplace(&mut children[0]);
-            Self::init_inplace(&mut children[NODE_SIZE as usize]);
-        }
-        
-        for i in 0 .. NODE_SIZE as usize {
+        for i in 0 .. NODE_SIZE {
             // safe because we only read each item once
             let item = unsafe { ptr::read(&self.items[i]) };
             
             if distances[i] <= radius {
-                children[0].push_item(item);
+                self.child_mut(0).push_item(item);
             } else {
-                children[NODE_SIZE as usize].push_item(item);
+                self.far_right_child_mut().push_item(item);
             }
         }
 
-        self.items_len = 1;
-        self.parents_len = 1;
         self.radii[0] = radius;
-        unsafe {
-            ptr::write(&mut self.items[0], item);
-            
-        }
-    }
-    
-    pub fn add_parent(&mut self, item: T, child_distances: &Distances) {
-        assert_eq!(self.far_right_child().items_len as usize, NODE_SIZE,
-                   "attempting to add parent with non-full right child");
-        assert!((self.parents_len as usize) < NODE_SIZE, "attempting to add parent to full node");
-        
         self.push_item(item);
+        self.is_leaf = false;
+    }
+
+    /// Add a new child to this node, partitioning items from the far right child
+    /// using `child_distances` and assuming `item` as the pivot
+    pub fn add_child(&mut self, item: T, child_distances: &Distances) {
+        assert!(!self.is_leaf(), "attempting to add child to leaf node; use make_internal()");
+        assert!(self.far_right_child().is_full(),
+                "attempting to add child with non-full right child");
+        assert!(self.len() < NODE_SIZE, "attempting to add child to full node");
 
         let radius = get_median(child_distances);
-        self.radii[self.parents_len as usize] = radius;
+        let len = self.len as usize;
 
-        {
-            let mut left = unsafe {
-                let parents_len = self.parents_len;
-                // breaks the borrow so we can get both left and right children
-                Self::init_inplace(self.child_mut_unchecked(parents_len))
-            };
-            let mut right = self.far_right_child_mut();
+        self.radii[len] = radius;
+        self.children[len] = Self::new_child(item, self, self.len);
 
-            right.drain_less_than(radius, child_distances, &mut left);
+        unsafe {
+            // both `self.children[len]` and `self.children[NODE_SIZE]` are valid
+            (*self.children[NODE_SIZE])
+                .drain_less_than(radius, child_distances, &mut *self.children[len]);
+
+            // we just initialized `self.children[len]`
+            self.unsafe_push_item(item);
         }
-
-        self.parents_len += 1;
     }
     
     fn drain_less_than(&mut self, radius: u64, distances: &Distances, drain_to: &mut Self) {
-        assert_eq!(self.items_len as usize, NODE_SIZE, "attempting to drain from non-full node");
-        assert_eq!(drain_to.items_len, 0, "attempting to drain to non-empty node");
+        assert_eq!(self.len(), NODE_SIZE, "attempting to drain from non-full node");
+        assert_eq!(drain_to.len(), 0, "attempting to drain to non-empty node");
 
-        self.items_len = 0;
+        self.len = 0;
 
-        for i in 0 .. NODE_SIZE as usize {
+        for i in 0 .. NODE_SIZE {
             let item = unsafe { ptr::read(&self.items[i]) };
 
             if distances[i] <= radius {
@@ -141,64 +151,51 @@ impl<T> Node<T> {
     }
 
     pub fn len(&self) -> usize {
-        self.items_len as usize
+        self.len as usize
     }
 
     pub fn is_full(&self) -> bool {
-        self.items_len as usize == NODE_SIZE
-    }
-
-    pub fn parents_full(&self) -> bool {
-        self.parents_len as usize == NODE_SIZE
-    }
-
-    /// Does *not* include the far-right child
-    pub fn children_len(&self) -> usize {
-        self.parents_len as usize
+        self.len as usize == NODE_SIZE
     }
 
     pub fn is_leaf(&self) -> bool {
-        self.children.is_none()
+        self.is_leaf
     }
 
-    pub fn items(&self) -> &[T] {
-        &self.items[..self.items_len as usize]
+    pub fn items(&self) -> Items<T> {
+        Items {
+            items: self.items[..self.len].iter().enumerate(),
+            removed: &self.removed,
+        }
     }
 
-    pub fn items_mut(&mut self) -> &mut [T] {
-        &mut self.items[..self.items_len as usize]
+    pub fn items_mut(&mut self) -> ItemsMut<T> {
+        ItemsMut {
+            items: self.items[..self.len].iter_mut().enumerate(),
+            removed: &self.removed,
+        }
     }
 
     pub fn child(&self, idx: usize) -> &Node<T> {
-        assert!(idx < self.children_len(), "idx out of bounds {} ({})", idx, self.children_len());
-        &self.children()[idx]
+        assert!(!self.is_leaf(), "attempting to get child of leaf node");
+        assert!(idx < self.len(), "idx out of bounds {} ({})", idx, self.len());
+        unsafe { self.children[idx].as_ref().unwrap() }
     }
 
     pub fn child_mut(&mut self, idx: usize) -> &mut Node<T> {
-        assert!(idx < self.children_len(), "idx out of bounds {} ({})", idx, self.children_len());
-        &mut self.children_mut()[idx]
-    }
-
-    unsafe fn child_mut_unchecked(&mut self, idx: u8) -> &mut Node<T> {
-        &mut self.children_mut()[idx as usize]
+        assert!(!self.is_leaf(), "attempting to get child of leaf node");
+        assert!(idx < self.len(), "idx out of bounds {} ({})", idx, self.len());
+        unsafe { self.children[idx].as_mut().unwrap() }
     }
     
     pub fn far_right_child(&self) -> &Node<T> {
-        assert!(!self.is_leaf(), "attempting to get child of leaf node");
-        &self.children()[NODE_SIZE as usize]
+        assert!(!self.is_leaf(), "attempting to get far right child of leaf node");
+        unsafe { self.children[NODE_SIZE].as_ref().unwrap() }
     }
 
     pub fn far_right_child_mut(&mut self) -> &mut Node<T> {
-        assert!(!self.is_leaf(), "attempting to get child of leaf node");
-        &mut self.children_mut()[NODE_SIZE as usize]
-    }
-    
-    fn children(&self) -> &ChildArray<T> {
-        &**self.children.as_ref().expect("node children not allocated")
-    }
-    
-    fn children_mut(&mut self) -> &mut ChildArray<T> {
-        self.children.as_mut().expect("node children not allocated")
+        assert!(!self.is_leaf(), "attempting to get far right child of leaf node");
+        unsafe { self.children[NODE_SIZE].as_mut().unwrap() }
     }
 
     pub fn has_parent(&self) -> bool {
@@ -209,9 +206,16 @@ impl<T> Node<T> {
         self.parent
     }
 
-    pub fn parent_idx(&self) -> usize {
-        assert!(self.has_parent(), "parent idx of root node makes no sense");
-        self.parent_idx as usize
+    pub fn child_idx(&self) -> usize {
+        assert!(self.has_parent(), "child_idx() of root node");
+        self.child_idx as usize
+    }
+
+    /// Atomically mark the item at `idx` as removed without removing it from the tree;
+    /// actually removing items would require significant restructuring of the tree
+    pub fn remove_item(&self, idx: usize) {
+        assert!(idx < self.len(), "attempt to remove item out of bounds: {}, {}", idx, self.len);
+        self.removed.fetch_or(1 << idx, Ordering::AcqRel);
     }
 
     /// # Safety
@@ -220,12 +224,12 @@ impl<T> Node<T> {
         if self.parent.is_null() {
             None
         } else {
-            Some((&*self.parent, self.parent_idx as usize))
+            Some((&*self.parent, self.child_idx as usize))
         }
     }
 
-    pub unsafe fn parent_mut(&mut self) -> Option<&mut Node<T>> {
-        (self.parent as *mut Node<T>).as_mut()
+    pub unsafe fn parent_mut(&mut self) -> &mut Node<T> {
+        (self.parent as *mut Node<T>).as_mut().expect("getting nonexistent parent")
     }
 
     /// Get the distances to the items in this node
@@ -242,49 +246,85 @@ impl<T> Node<T> {
     }
 
     pub fn radii(&self) -> &[u64] {
-        &self.radii[..self.parents_len as usize]
+        assert!(!self.is_leaf(), "attempting to get radii of leaf node");
+        &self.radii[..self.len as usize]
     }
 
     pub fn find_parent(&self, distances: &Distances) -> Option<usize> {
-        self.radii.iter().zip(&distances[..]).position(|(rad, dist)| dist <= rad)
+        self.radii().iter().zip(&distances[..]).position(|(rad, dist)| dist <= rad)
     }
 }
 
-/// Allocates uninitialized memory and does not drop automatically
-pub struct CustomBox<T>(NonNull<T>);
+impl<T> Drop for Node<T> {
+    fn drop(&mut self) {
+        self.parent = ptr::null();
+        let len = self.len();
+        self.len = 0;
 
-impl<T> CustomBox<T> {
-    unsafe fn alloc() -> Self {
-        let layout = Self::layout();
-        let ptr = alloc::alloc(layout) as *mut T;
-        CustomBox(NonNull::new(ptr).unwrap_or_else(|| alloc::handle_alloc_error(layout)))
-    }
+        // free children first
+        if !self.is_leaf {
+            self.is_leaf = true;
 
-    fn layout() -> Layout {
-        Layout::new::<T>()
-    }
+            for &child in &self.children[..len].chain(self.children.last()) {
+                unsafe {
+                    drop(Box::from_raw(child));
+                }
+            }
+        }
 
-    pub fn free(mut self) {
-        let layout = Self::layout();
-
-    }
-}
-
-impl<T> Deref for CustomBox<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        unsafe {
-            self.0.as_ref()
+        for item in &mut self.items[..len] {
+            unsafe {
+                ptr::drop_in_place(item);
+            }
         }
     }
 }
 
-impl<T> DerefMut for CustomBox<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        unsafe {
-            self.0.as_mut()
-        }
+fn is_removed(removed: &AtomicBitSet, idx: usize) -> bool {
+    (removed.load(Ordering::Acquire) && (1 << idx)) != 0
+}
+
+pub struct Items<'a, T: 'a> {
+    items: Enumerate<slice::Iter<'a, T>>,
+    removed: &'a AtomicBitSet,
+}
+
+impl<'a, T: 'a> Iterator for Items<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        self.items.by_ref()
+            .filter(|&(idx, _)| is_removed(&self.removed, idx))
+            .map(|(_, item)| item)
+            .next()
+    }
+}
+
+impl<'a, T: 'a> Items<'a, T> {
+    pub fn is_empty(&self) -> bool {
+        self.items.len() == 0
+    }
+}
+
+pub struct ItemsMut<'a, T: 'a> {
+    items: Enumerate<slice::IterMut<'a, T>>,
+    removed: &'a AtomicBitSet,
+}
+
+impl<'a, T: 'a> ItemsMut<'a, T> {
+    pub fn is_empty(&self) -> bool {
+        self.items.len() == 0
+    }
+}
+
+impl<'a, T: 'a> Iterator for ItemsMut<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<&'a mut T> {
+        self.items.by_ref()
+            .filter(|&(idx, _)| is_removed(&self.removed, idx))
+            .map(|(_, item)| item)
+            .next()
     }
 }
 
@@ -293,4 +333,63 @@ fn get_median(distances: &Distances) -> u64 {
     let mut dists_clone = *distances;
     dists_clone.sort();
     dists_clone[NODE_SIZE as usize / 2]
+}
+
+#[test]
+fn test_get_median() {
+    assert_eq!(get_median(&[1, 2, 3, 4, 5]), 3);
+}
+
+#[test]
+fn size_asserts() {
+    assert!(NODE_SIZE < u8::max_value() as usize);
+    assert!(CHILD_SIZE < u8::max_value() as usize);
+    assert!(NODE_SIZE % 2 != 0, "NODE_SIZE should be odd");
+}
+
+#[test]
+fn test_make_internal_add_parent() {
+    let mut node = Node::new_box(0);
+
+    for i in 1 .. 5 {
+        node.push_item(i);
+    }
+
+    assert_eq!(node.len(), 5);
+    assert!(node.is_leaf());
+
+    node.make_internal(5, &[5, 4, 3, 2, 1]);
+
+    assert!(!node.is_leaf());
+
+    assert_eq!(node.radii()[0], 3);
+
+    assert_eq!(
+        node.child(0).items(),
+        &[2, 3, 4]
+    );
+
+    assert_eq!(
+        node.far_right_child().items(),
+        &[0, 1]
+    );
+
+    // items remain in the far right child
+    for i in 6 .. 9 {
+        node.far_right_child_mut().push_item(i);
+    }
+
+    assert_eq!(node.len(), 1);
+
+    node.add_parent(9, &[9, 8, 3, 2, 1]);
+
+    assert_eq!(node.len(), 2);
+    assert_eq!(
+        node.child(1).items(),
+        &[6, 7, 8]
+    );
+    assert_eq!(
+        node.far_right_child().items(),
+        &[0, 1]
+    )
 }

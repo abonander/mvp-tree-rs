@@ -3,15 +3,15 @@ use std::cmp::{self, Ordering};
 use std::collections::BinaryHeap;
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
-use std::slice;
+use std::{mem, slice};
 
 mod node;
 
-use node::{NODE_SIZE, Node, CustomBox};
+use node::{Node, NODE_SIZE};
 
 pub struct MvpTree<T, Df> {
     // must be boxed so it has a stable address
-    root: Option<CustomBox<Node<T>>>,
+    root: Option<Box<Node<T>>>,
     dist_fn: Df,
     len: usize,
     height: usize,
@@ -44,45 +44,50 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
             return;
         }
 
-        let mut node = &mut **self.root.as_mut().unwrap();
-        let mut depth = 0;
-
-        loop {
+        /// Find the node where `item` belongs and insert it there
+        fn find_insert<T, Df>(node: &mut Node<T>, item: T, dist_fn: Df, depth: usize) -> usize
+        where Df: Fn(&T, &T) -> u64 {
             assert!(node.len() > 0, "empty node");
 
             if node.is_leaf() && !node.is_full() {
                 // if the target node is a non-full leaf node, just push the item
                 node.push_item(item);
-                break;
+                return depth;
             }
 
-            // all following branches will go deeper or increase tree height
-            depth += 1;
+            let distances = node.get_distances(&item, &dist_fn);
 
-            let distances = node.get_distances(&item, &self.dist_fn);
-
-            if let Some(parent_idx) = node.find_parent(&distances) {
-                node = unsafe { &mut *(node.child_mut(parent_idx) as *mut _) };
-                continue;
+            if node.is_leaf() {
+                // node is leaf and full
+                if node.has_parent() && node.child_idx() == NODE_SIZE {
+                    // we are the far right leaf child -- add a parent to our parent node
+                    // safe because we're not modifying the tree at any other point
+                    unsafe { node.parent_mut().add_child(item, &distances) };
+                    return depth;
+                } else {
+                    // make the node internal, increasing the depth by 1
+                    node.make_internal(item, &distances);
+                    return depth + 1;
+                }
             }
 
-            // if the node children is full, recurse into far right child
-            if node.parents_full() {
-                node = unsafe { &mut *(node.far_right_child_mut() as *mut _) };
-            } else if node.is_leaf() {
-                node.make_internal(item, &distances);
-            } else if node.far_right_child().is_full() {
-                let distances = node.far_right_child().get_distances(&item, &self.dist_fn);
-                node.add_parent(item, &distances);
+            if let Some(child_idx) = node.find_parent(&distances) {
+                // recurse into the appropriate child
+                return find_insert(node.child_mut(child_idx), item, dist_fn, depth + 1);
             }
 
-            break;
+            find_insert(node.far_right_child_mut(), item, dist_fn, depth + 1)
         }
 
+        let mut node = &mut **self.root.as_mut().unwrap();
+        let insert_depth = find_insert(node, item, &self.dist_fn, 0);
+
         // update the height if it increased
-        self.height = cmp::max(self.height, depth);
+        self.height = cmp::max(self.height, insert_depth);
     }
 
+    // noinspection RsNeedlessLifetimes inspection wants us to elide `'a` here but
+    // we don't want to require `item` to live as long as `'a` since it's not returned
     pub fn k_nearest<'a>(&'a self, k: usize, item: &T) -> Vec<Neighbor<'a, T>> {
         if k == 0 { return vec![]; }
 
@@ -100,15 +105,13 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
 
         visitor.visit(root);
 
-        // FIXME: I'm pretty sure we're supposed to hit other nodes if the heap isn't full yet
-
         visitor.neighbors.into_sorted_vec()
     }
 
     pub fn iter(&self) -> Iter<T> {
         Iter {
             dfs: DepthFirst::new(&self.root),
-            items: [].iter(),
+            items: None,
             _borrow: PhantomData,
         }
     }
@@ -116,7 +119,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     pub fn iter_mut(&mut self) -> IterMut<T> {
         IterMut {
             dfs: DepthFirst::new(&self.root),
-            items: [].iter_mut(),
+            items: None,
             _borrow: PhantomData,
         }
     }
@@ -159,7 +162,7 @@ impl<'a, T: 'a> Ord for Neighbor<'a, T> {
 
 pub struct Iter<'a, T: 'a> {
     dfs: DepthFirst<T>,
-    items: slice::Iter<'a, T>,
+    items: Option<node::Items<'a, T>>,
     _borrow: PhantomData<&'a T>,
 }
 
@@ -167,20 +170,22 @@ impl<'a, T: 'a> Iterator for Iter<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<&'a T> {
-        if self.items.len() == 0 {
+        loop {
+            if let Some(next) = self.items.as_mut().and_then(|i| i.next()) {
+                return Some(next);
+            }
+
             unsafe {
                 let next_node = self.dfs.next();
-                self.items = next_node.as_ref()?.items().iter();
+                self.items = Some(next_node.as_ref()?.items());
             }
         }
-
-        self.items.next()
     }
 }
 
 pub struct IterMut<'a, T: 'a> {
     dfs: DepthFirst<T>,
-    items: slice::IterMut<'a, T>,
+    items: Option<node::ItemsMut<'a, T>>,
     _borrow: PhantomData<&'a mut T>,
 }
 
@@ -188,14 +193,16 @@ impl<'a, T: 'a> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<&'a mut T> {
-        if self.items.len() == 0 {
+        loop {
+            if let Some(next) = self.items.as_mut().and_then(|i| i.next()) {
+                return Some(next);
+            }
+
             unsafe {
                 let next_node = self.dfs.next() as *mut Node<T>;
-                self.items = next_node.as_mut()?.items_mut().iter_mut();
+                self.items = Some(next_node.as_mut()?.items_mut());
             }
         }
-
-        self.items.next()
     }
 }
 
@@ -206,7 +213,7 @@ struct DepthFirst<T> {
 }
 
 impl<T> DepthFirst<T> {
-    fn new(root: &Option<CustomBox<Node<T>>>) -> Self {
+    fn new(root: &Option<Box<Node<T>>>) -> Self {
         DepthFirst {
             node: root.as_ref().map_or(ptr::null(), |r| &**r),
             descend: true,
@@ -219,15 +226,23 @@ impl<T> DepthFirst<T> {
             return self.node;
         }
 
+        // `self.node` should NOT be NULL after this point
         if !self.descend {
             while let Some((parent, child_idx)) = (*self.node).parent_and_idx() {
-                if child_idx + 1 < parent.children_len() {
+                if child_idx + 1 < parent.len() {
+                    // descend into the next sibling, excluding far right child
                     self.node = parent.child(child_idx + 1);
                     self.descend = true;
                     break;
+                } else if child_idx > parent.len() {
+                    // ascend out of the far right child
+                    return mem::replace(&mut self.node, parent);
+                } else {
+                    // descend into the far right child
+                    self.node = parent.far_right_child();
+                    self.descend = true;
+                    break;
                 }
-
-                self.node = parent;
             }
         }
 
@@ -236,6 +251,10 @@ impl<T> DepthFirst<T> {
                 self.node = (*self.node).child(0);
             }
             self.descend = false;
+        }
+
+        if !(*self.node).has_parent() {
+            return mem::replace(&mut self.node, ptr::null());
         }
 
         self.node
@@ -326,18 +345,37 @@ fn empty_tree() {
 fn one_level() {
     let mut tree = MvpTree::new(compare);
 
-    tree.extend(0 .. 6);
+    tree.extend(0 .. 5);
 
-    assert_eq!(tree.len(), 6);
+    assert_eq!(tree.len(), 5);
     assert_eq!(tree.height(), 1);
 
     assert_eq!(
         tree.iter().cloned().collect::<Vec<_>>(),
-        (0 .. 6).collect::<Vec<_>>()
+        (0 .. 5).collect::<Vec<_>>()
     );
 }
 
 #[test]
+fn two_levels() {
+    // this test should fill exactly two levels of the tree
+
+    let mut tree = MvpTree::new(compare);
+
+    tree.extend(0 .. 40);
+
+    assert_eq!(tree.len(), 40);
+    assert_eq!(tree.height(), 2);
+
+    assert_eq!(
+        tree.iter().cloned().collect::<Vec<_>>(),
+        &[
+            3, 4, 5, 6
+        ]
+    );
+}
+
+#[test] #[ignore]
 fn test_100() {
     let mut tree = MvpTree::new(compare);
     tree.extend(0 .. 100);
