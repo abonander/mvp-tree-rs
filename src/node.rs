@@ -89,11 +89,12 @@ impl<T> Node<T> {
         for i in 0 .. NODE_SIZE {
             // safe because we only read each item once
             let item = unsafe { ptr::read(&self.items[i]) };
-            
+
+            // we just initialized these indices
             if distances[i] <= radius {
-                self.child_mut(0).push_item(item);
+                unsafe { (*self.children[0]).push_item(item); }
             } else {
-                self.far_right_child_mut().push_item(item);
+                unsafe { (*self.children[NODE_SIZE]).push_item(item); }
             }
         }
 
@@ -300,7 +301,7 @@ impl<'a, T: 'a> Iterator for FilteredItems<'a, T> {
     fn next(&mut self) -> Option<(usize, &'a T)> {
         let removed = self.removed;
         self.items.by_ref()
-            .filter(|&(idx, _)| is_removed(removed, idx))
+            .filter(|&(idx, _)| !is_removed(removed, idx))
             .next()
     }
 }
@@ -328,7 +329,7 @@ impl<'a, T: 'a> Iterator for FilteredItemsMut<'a, T> {
     fn next(&mut self) -> Option<(usize, &'a mut T)> {
         let removed = self.removed;
         self.items.by_ref()
-            .filter(|&(idx, _)| is_removed(removed, idx))
+            .filter(|&(idx, _)| !is_removed(removed, idx))
             .next()
     }
 }

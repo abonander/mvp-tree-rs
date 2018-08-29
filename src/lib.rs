@@ -234,7 +234,7 @@ impl<T> DepthFirst<T> {
                     self.node = parent.child(child_idx + 1);
                     self.descend = true;
                     break;
-                } else if child_idx > parent.len() {
+                } else if child_idx == NODE_SIZE {
                     // ascend out of the far right child
                     return mem::replace(&mut self.node, parent);
                 } else {
