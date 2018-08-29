@@ -36,18 +36,11 @@ pub struct Node<T> {
 
 impl<T> Node<T> {
     /// `Box` is necessary for stable addressing so parent pointers work as expected
-    /// An item is required so we never have empty nodes
-    pub fn new_box(item: T) -> Box<Self> {
-        // FIXME: use `MaybeUninit` when stable to avoid copying garbage data
-        let mut items = ManuallyDrop::new(unsafe { mem::zeroed() });
-
-        unsafe {
-            ptr::write(&mut items[0], item);
-        }
-
+    pub fn new_box() -> Box<Self> {
         Box::new(Node {
-            items,
-            len: 1,
+            // FIXME: use `MaybeUninit` when stable to avoid copying garbage data
+            items: unsafe { mem::zeroed() },
+            len: 0,
             removed: Default::default(),
             is_leaf: true,
             children: [ptr::null_mut(); CHILD_SIZE],
@@ -57,8 +50,8 @@ impl<T> Node<T> {
         })
     }
 
-    fn new_child(item: T, parent: *const Self, child_idx: u8) -> *mut Self {
-        let mut node = Self::new_box(item);
+    fn new_child(parent: *const Self, child_idx: u8) -> *mut Self {
+        let mut node = Self::new_box();
         node.parent = parent;
         node.child_idx = child_idx;
         Box::into_raw(node)
@@ -90,8 +83,8 @@ impl<T> Node<T> {
         
         let radius = get_median(distances);
 
-        self.children[0] = Self::new_child(item, self, 0);
-        self.children[NODE_SIZE] = Self::new_child(item, self, NODE_SIZE as u8);
+        self.children[0] = Self::new_child(self, 0);
+        self.children[NODE_SIZE] = Self::new_child(self, NODE_SIZE as u8);
         
         for i in 0 .. NODE_SIZE {
             // safe because we only read each item once
@@ -121,7 +114,7 @@ impl<T> Node<T> {
         let len = self.len as usize;
 
         self.radii[len] = radius;
-        self.children[len] = Self::new_child(item, self, self.len);
+        self.children[len] = Self::new_child(self, self.len);
 
         unsafe {
             // both `self.children[len]` and `self.children[NODE_SIZE]` are valid
@@ -162,16 +155,28 @@ impl<T> Node<T> {
         self.is_leaf
     }
 
-    pub fn items(&self) -> Items<T> {
-        Items {
-            items: self.items[..self.len].iter().enumerate(),
+    pub fn items(&self) -> &[T] {
+        &self.items[..self.len as usize]
+    }
+
+    pub fn items_mut(&mut self) -> &mut [T] {
+        &mut self.items[..self.len as usize]
+    }
+
+    pub fn is_removed(&self, idx: usize) -> bool {
+        is_removed(&self.removed, idx)
+    }
+
+    pub fn filtered_items(&self) -> FilteredItems<T> {
+        FilteredItems {
+            items: self.items[..self.len as usize].iter().enumerate(),
             removed: &self.removed,
         }
     }
 
-    pub fn items_mut(&mut self) -> ItemsMut<T> {
-        ItemsMut {
-            items: self.items[..self.len].iter_mut().enumerate(),
+    pub fn filtered_items_mut(&mut self) -> FilteredItemsMut<T> {
+        FilteredItemsMut {
+            items: self.items[..self.len as usize].iter_mut().enumerate(),
             removed: &self.removed,
         }
     }
@@ -265,7 +270,7 @@ impl<T> Drop for Node<T> {
         if !self.is_leaf {
             self.is_leaf = true;
 
-            for &child in &self.children[..len].chain(self.children.last()) {
+            for &child in self.children[..len].iter().chain(self.children.last()) {
                 unsafe {
                     drop(Box::from_raw(child));
                 }
@@ -281,49 +286,49 @@ impl<T> Drop for Node<T> {
 }
 
 fn is_removed(removed: &AtomicBitSet, idx: usize) -> bool {
-    (removed.load(Ordering::Acquire) && (1 << idx)) != 0
+    (removed.load(Ordering::Acquire) & (1 << idx)) != 0
 }
 
-pub struct Items<'a, T: 'a> {
+pub struct FilteredItems<'a, T: 'a> {
     items: Enumerate<slice::Iter<'a, T>>,
     removed: &'a AtomicBitSet,
 }
 
-impl<'a, T: 'a> Iterator for Items<'a, T> {
-    type Item = &'a T;
+impl<'a, T: 'a> Iterator for FilteredItems<'a, T> {
+    type Item = (usize, &'a T);
 
-    fn next(&mut self) -> Option<&'a T> {
+    fn next(&mut self) -> Option<(usize, &'a T)> {
+        let removed = self.removed;
         self.items.by_ref()
-            .filter(|&(idx, _)| is_removed(&self.removed, idx))
-            .map(|(_, item)| item)
+            .filter(|&(idx, _)| is_removed(removed, idx))
             .next()
     }
 }
 
-impl<'a, T: 'a> Items<'a, T> {
+impl<'a, T: 'a> FilteredItems<'a, T> {
     pub fn is_empty(&self) -> bool {
         self.items.len() == 0
     }
 }
 
-pub struct ItemsMut<'a, T: 'a> {
+pub struct FilteredItemsMut<'a, T: 'a> {
     items: Enumerate<slice::IterMut<'a, T>>,
     removed: &'a AtomicBitSet,
 }
 
-impl<'a, T: 'a> ItemsMut<'a, T> {
+impl<'a, T: 'a> FilteredItemsMut<'a, T> {
     pub fn is_empty(&self) -> bool {
         self.items.len() == 0
     }
 }
 
-impl<'a, T: 'a> Iterator for ItemsMut<'a, T> {
-    type Item = &'a mut T;
+impl<'a, T: 'a> Iterator for FilteredItemsMut<'a, T> {
+    type Item = (usize, &'a mut T);
 
-    fn next(&mut self) -> Option<&'a mut T> {
+    fn next(&mut self) -> Option<(usize, &'a mut T)> {
+        let removed = self.removed;
         self.items.by_ref()
-            .filter(|&(idx, _)| is_removed(&self.removed, idx))
-            .map(|(_, item)| item)
+            .filter(|&(idx, _)| is_removed(removed, idx))
             .next()
     }
 }
@@ -349,9 +354,9 @@ fn size_asserts() {
 
 #[test]
 fn test_make_internal_add_parent() {
-    let mut node = Node::new_box(0);
+    let mut node = Node::new_box();
 
-    for i in 1 .. 5 {
+    for i in 0 .. 5 {
         node.push_item(i);
     }
 
@@ -381,7 +386,7 @@ fn test_make_internal_add_parent() {
 
     assert_eq!(node.len(), 1);
 
-    node.add_parent(9, &[9, 8, 3, 2, 1]);
+    node.add_child(9, &[9, 8, 3, 2, 1]);
 
     assert_eq!(node.len(), 2);
     assert_eq!(

@@ -39,7 +39,9 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         self.len = self.len.checked_add(1).expect("overflow `self.len + 1`");
 
         if let None = self.root {
-            self.root = Some(Node::new_box(item));
+            let mut root = Node::new_box();
+            root.push_item(item);
+            self.root = Some(root);
             self.height = 1;
             return;
         }
@@ -47,8 +49,6 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         /// Find the node where `item` belongs and insert it there
         fn find_insert<T, Df>(node: &mut Node<T>, item: T, dist_fn: Df, depth: usize) -> usize
         where Df: Fn(&T, &T) -> u64 {
-            assert!(node.len() > 0, "empty node");
-
             if node.is_leaf() && !node.is_full() {
                 // if the target node is a non-full leaf node, just push the item
                 node.push_item(item);
@@ -162,7 +162,7 @@ impl<'a, T: 'a> Ord for Neighbor<'a, T> {
 
 pub struct Iter<'a, T: 'a> {
     dfs: DepthFirst<T>,
-    items: Option<node::Items<'a, T>>,
+    items: Option<node::FilteredItems<'a, T>>,
     _borrow: PhantomData<&'a T>,
 }
 
@@ -171,13 +171,13 @@ impl<'a, T: 'a> Iterator for Iter<'a, T> {
 
     fn next(&mut self) -> Option<&'a T> {
         loop {
-            if let Some(next) = self.items.as_mut().and_then(|i| i.next()) {
+            if let Some((_, next)) = self.items.as_mut().and_then(|i| i.next()) {
                 return Some(next);
             }
 
             unsafe {
                 let next_node = self.dfs.next();
-                self.items = Some(next_node.as_ref()?.items());
+                self.items = Some(next_node.as_ref()?.filtered_items());
             }
         }
     }
@@ -185,7 +185,7 @@ impl<'a, T: 'a> Iterator for Iter<'a, T> {
 
 pub struct IterMut<'a, T: 'a> {
     dfs: DepthFirst<T>,
-    items: Option<node::ItemsMut<'a, T>>,
+    items: Option<node::FilteredItemsMut<'a, T>>,
     _borrow: PhantomData<&'a mut T>,
 }
 
@@ -194,13 +194,13 @@ impl<'a, T: 'a> Iterator for IterMut<'a, T> {
 
     fn next(&mut self) -> Option<&'a mut T> {
         loop {
-            if let Some(next) = self.items.as_mut().and_then(|i| i.next()) {
+            if let Some((_, next)) = self.items.as_mut().and_then(|i| i.next()) {
                 return Some(next);
             }
 
             unsafe {
                 let next_node = self.dfs.next() as *mut Node<T>;
-                self.items = Some(next_node.as_mut()?.items_mut());
+                self.items = Some(next_node.as_mut()?.filtered_items_mut());
             }
         }
     }
@@ -295,13 +295,18 @@ impl<'i, 'n, T: 'i + 'n, Df> KnnVisitor<'i, 'n, T, Df> where Df: Fn(&T, &T) -> u
         let items_dists = node.items().iter().zip(&distances);
 
         if node.is_leaf() {
-            for (item, &dist) in items_dists {
-                self.push_heap(item, dist);
+            for (idx, (item, &dist)) in items_dists.enumerate() {
+                if !node.is_removed(idx) {
+                    self.push_heap(item, dist);
+                }
             }
         } else {
             for (idx, ((item, &dist), &radius)) in items_dists.zip(node.radii()).enumerate() {
                 if dist <= radius {
-                    self.push_heap(item, dist);
+                    if !node.is_removed(idx) {
+                        self.push_heap(item, dist);
+                    }
+
                     self.visit(node.child(idx));
 
                     // if we haven't reached `k` neighbors or the farthest neighbor is further
