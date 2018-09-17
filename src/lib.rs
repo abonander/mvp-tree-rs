@@ -83,7 +83,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         let insert_depth = find_insert(node, item, &self.dist_fn, 0);
 
         // update the height if it increased
-        self.height = cmp::max(self.height, insert_depth);
+        self.height = cmp::max(self.height, insert_depth + 1);
     }
 
     // noinspection RsNeedlessLifetimes inspection wants us to elide `'a` here but
@@ -350,34 +350,64 @@ fn empty_tree() {
 fn one_level() {
     let mut tree = MvpTree::new(compare);
 
-    tree.extend(0 .. 5);
+    tree.extend(0 .. NODE_SIZE as u64);
 
-    assert_eq!(tree.len(), 5);
+    assert_eq!(tree.len(), NODE_SIZE);
     assert_eq!(tree.height(), 1);
 
     assert_eq!(
         tree.iter().cloned().collect::<Vec<_>>(),
-        (0 .. 5).collect::<Vec<_>>()
+        (0 .. NODE_SIZE as u64).collect::<Vec<_>>()
     );
 }
 
 #[test]
 fn two_levels() {
     // this test should fill exactly two levels of the tree
-
     let mut tree = MvpTree::new(compare);
 
-    tree.extend(0 .. 40);
+    let vals = [
+        0, 1, 2, 11, 12, 5, 6, 7, // 0 1 2 6 7 should go to left child with 5 as the pivot
+        13, 22, 23, 16, 17, 18, // 11 12 13 17 18 goes left with 16 as the pivot
+        24, 33, 34, 27, 28, 29, // 22 23 24 28 29 go left with 27 as pivot
+        35, 44, 45, 38, 39, 40, // 33 34 35 39 40 go left with 38 as pivot
+        46, 55, 56, 49, 50, 51, // 44 45 46 50 51 go left with 49 as pivot
+        57, 58, 59 // 55 56 57 58 59 end up in far right child
+    ];
 
-    assert_eq!(tree.len(), 40);
+    // use manual loop because `.extend()` might do bulk operations that can shift the distribution
+    for &val in vals.iter() { tree.insert(val) }
+
+    assert_eq!(tree.len(), 35);
     assert_eq!(tree.height(), 2);
 
-    assert_eq!(
-        tree.iter().cloned().collect::<Vec<_>>(),
-        &[
-            3, 4, 5, 6
-        ]
-    );
+    let root = tree.root.as_ref().unwrap();
+    assert_eq!(root.items(), &[5, 16, 27, 38, 49]);
+    assert_eq!(root.radii(), &[5, 5, 5, 5, 5]);
+
+    let child_0 = root.child(0);
+    assert_eq!(child_0.items(), &[0, 1, 2, 6, 7]);
+    assert!(child_0.is_leaf());
+
+    let child_1 = root.child(1);
+    assert_eq!(child_1.items(), &[11, 12, 13, 17, 18]);
+    assert!(child_1.is_leaf());
+
+    let child_2 = root.child(2);
+    assert_eq!(child_2.items(), &[22, 23, 24, 28, 29]);
+    assert!(child_2.is_leaf());
+
+    let child_3 = root.child(3);
+    assert_eq!(child_3.items(), &[33, 34, 35, 39, 40]);
+    assert!(child_3.is_leaf());
+
+    let child_4 = root.child(4);
+    assert_eq!(child_4.items(), &[44, 45, 46, 50, 51]);
+    assert!(child_4.is_leaf());
+
+    let child_5 = root.far_right_child();
+    assert_eq!(child_5.items(), &[55, 56, 57, 58, 59]);
+    assert!(child_5.is_leaf());
 }
 
 #[test] #[ignore]

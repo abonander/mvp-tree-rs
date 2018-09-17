@@ -369,16 +369,10 @@ fn test_make_internal_add_parent() {
     assert!(!node.is_leaf());
 
     assert_eq!(node.radii()[0], 3);
+    assert_eq!(node.items(), &[5]);
 
-    assert_eq!(
-        node.child(0).items(),
-        &[2, 3, 4]
-    );
-
-    assert_eq!(
-        node.far_right_child().items(),
-        &[0, 1]
-    );
+    assert_eq!(node.child(0).items(), &[2, 3, 4]);
+    assert_eq!(node.far_right_child().items(), &[0, 1]);
 
     // items remain in the far right child
     for i in 6 .. 9 {
@@ -390,6 +384,8 @@ fn test_make_internal_add_parent() {
     node.add_child(9, &[9, 8, 3, 2, 1]);
 
     assert_eq!(node.len(), 2);
+    assert_eq!(node.items(), &[5, 9]);
+
     assert_eq!(
         node.child(1).items(),
         &[6, 7, 8]
