@@ -228,21 +228,21 @@ impl<T> DepthFirst<T> {
 
         // `self.node` should NOT be NULL after this point
         if !self.descend {
-            while let Some((parent, child_idx)) = (*self.node).parent_and_idx() {
+            if let Some((parent, child_idx)) = (*self.node).parent_and_idx() {
                 if child_idx + 1 < parent.len() {
                     // descend into the next sibling, excluding far right child
                     self.node = parent.child(child_idx + 1);
                     self.descend = true;
-                    break;
                 } else if child_idx == NODE_SIZE {
                     // ascend out of the far right child
-                    return mem::replace(&mut self.node, parent);
+                    self.node = parent;
                 } else {
                     // descend into the far right child
                     self.node = parent.far_right_child();
                     self.descend = true;
-                    break;
                 }
+            } else {
+                self.node = ptr::null();
             }
         }
 
@@ -251,10 +251,6 @@ impl<T> DepthFirst<T> {
                 self.node = (*self.node).child(0);
             }
             self.descend = false;
-        }
-
-        if !(*self.node).has_parent() {
-            return mem::replace(&mut self.node, ptr::null());
         }
 
         self.node
@@ -409,6 +405,46 @@ fn two_levels() {
     assert_eq!(child_5.items(), &[55, 56, 57, 58, 59]);
     assert!(child_5.is_leaf());
 }
+
+#[test]
+fn test_dfs() {
+    use std::collections::HashSet;
+
+    let len = 35;
+
+    let mut tree = MvpTree::new(compare);
+    tree.extend(0 .. 35);
+
+    let mut dfs = DepthFirst::new(&tree.root);
+    let mut set = HashSet::new();
+
+    loop {
+        let ptr = unsafe { dfs.next() };
+
+        if ptr.is_null() { break; }
+
+        // not assert so we have an inner source line to break on
+        if !set.insert(ptr) {
+            panic!("DepthFirst returned duplicate node");
+        }
+    }
+}
+
+#[test]
+fn test_iter() {
+    use std::collections::HashSet;
+
+    let len = 35;
+
+    let mut tree = MvpTree::new(compare);
+    tree.extend(0 .. len);
+    let mut set = (0 .. len).collect::<HashSet<u64>>();
+
+    for val in tree.iter() {
+        assert!(set.remove(&val), "val returned multiple times from iterator: {}", val);
+    }
+}
+
 
 #[test] #[ignore]
 fn test_100() {
