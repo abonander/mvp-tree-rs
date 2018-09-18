@@ -160,6 +160,10 @@ impl<'a, T: 'a> Ord for Neighbor<'a, T> {
     }
 }
 
+impl<'a, T: 'a + PartialEq<T>> PartialEq<T> for Neighbor<'a, T> {
+    fn eq(&self, other: &T) -> bool { *self.item == *other }
+}
+
 pub struct Iter<'a, T: 'a> {
     dfs: DepthFirst<T>,
     items: Option<node::FilteredItems<'a, T>>,
@@ -445,6 +449,59 @@ fn test_iter() {
     }
 }
 
+
+#[cfg(test)]
+fn compare_bits(left: &u32, right: &u32) -> u64 {
+    (left ^ right).count_ones() as u64
+}
+
+#[test]
+fn test_knn() {
+    use std::collections::HashMap;
+
+    fn bitmask(num_bits: u32) -> u32 {
+        let mut accum = 0;
+        for shift in 0 .. num_bits {
+            accum |= 1 << shift;
+        }
+        accum
+    }
+
+    let mut tree = MvpTree::new(compare_bits);
+
+    let start_bits = 0xAAAAAAAA; // repeating 1010[...]
+
+    tree.insert(start_bits);
+
+    // max number of bits different
+    for diff_bits in 1 ..= 4 {
+        let mask = bitmask(diff_bits);
+
+        for shift in 0 .. 8 {
+            // insert new bitpatterns by xoring a shifted mask
+            tree.insert(start_bits ^ (mask << shift * 4));
+        }
+    }
+
+    let knn = tree.k_nearest(9, &start_bits);
+    let mut knn_map: HashMap<_, _> = knn.into_iter()
+        .map(|neighbor| (*neighbor.item, false)).collect();
+
+    assert_eq!(knn_map.len(), 9);
+    assert!(knn_map.contains_key(&start_bits), "kNN does not contain starting bitpattern");
+
+    // kNN should contain all bitpatterns with 1 bit different
+    let test_mask = bitmask(1);
+
+    for shift in 0 .. 8 {
+        let bitpattern = start_bits ^ (test_mask << shift * 4);
+        let mut entry = knn_map.get_mut(&bitpattern)
+            .expect(&format!("missing bitpattern in kNN set: {:b}", bitpattern));
+
+        assert!(!*entry, "kNN set duplicated bit pattern: {:b}", bitpattern);
+        *entry = true;
+    }
+}
 
 #[test] #[ignore]
 fn test_100() {
