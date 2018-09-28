@@ -8,7 +8,7 @@ fn main() {
     let mut data = Vec::new();
 
     if let Some(path) = env::args().nth(1) {
-        let mut file = File::open(path).expect(&format!("failed to open file: {}", path));
+        let mut file = File::open(&path).expect(&format!("failed to open file: {}", path));
         file.read_to_end(&mut data).expect("failed to read file");
     } else {
         let mut stdin = io::stdin();
