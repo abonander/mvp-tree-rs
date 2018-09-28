@@ -510,3 +510,19 @@ fn test_100() {
     assert_eq!(tree.len(), 100);
     assert_eq!(tree.height(), 10);
 }
+
+pub fn fuzz_iter(data: &[u8]) {
+    let mut words = data.chunks(2)
+        .filter(|chunk| chunk.len() == 2)
+        .map(|chunk| (chunk[0] as u16 | (chunk[1] as u16) << 8))
+        .collect::<Vec<_>>();
+
+    let mut tree = MvpTree::new(|&l: &u16, &r| (l ^ r).count_ones() as u64);
+    tree.extend(words.iter().cloned());
+    words.sort();
+
+    let mut words_test = tree.iter().cloned().collect::<Vec<_>>();
+    words_test.sort();
+
+    assert_eq!(words, words_test);
+}
