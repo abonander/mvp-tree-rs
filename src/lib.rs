@@ -439,7 +439,7 @@ fn test_dfs() {
 fn test_iter() {
     use std::collections::HashSet;
 
-    let len = 35;
+    let len = 100;
 
     let mut tree = MvpTree::new(compare);
     tree.extend(0 .. len);
@@ -502,14 +502,6 @@ fn test_knn() {
         assert!(!*entry, "kNN set duplicated bit pattern: {:b}", bitpattern);
         *entry = true;
     }
-}
-
-#[test] #[ignore]
-fn test_100() {
-    let mut tree = MvpTree::new(compare);
-    tree.extend(0 .. 100);
-    assert_eq!(tree.len(), 100);
-    assert_eq!(tree.height(), 10);
 }
 
 pub fn fuzz_iter(data: &[u8]) {
