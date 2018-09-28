@@ -4,6 +4,8 @@ use std::env;
 use std::fs::File;
 use std::io::{self, Read};
 
+// created to reproduce panics outsize of `libFuzzer`
+// https://github.com/rust-fuzz/libfuzzer-sys/issues/36
 fn main() {
     let mut data = Vec::new();
 
