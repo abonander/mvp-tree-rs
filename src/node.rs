@@ -109,7 +109,10 @@ impl<T> Node<T> {
         assert!(!self.is_leaf(), "attempting to add child to leaf node; use make_internal()");
         assert!(self.far_right_child().is_full(),
                 "attempting to add child with non-full right child");
-        assert!(self.len() < NODE_SIZE, "attempting to add child to full node");
+        if self.len() == NODE_SIZE {
+            1 + 1;
+            panic!("attempting to add child to full node");
+        }
 
         let radius = get_median(child_distances);
         let len = self.len as usize;
@@ -231,6 +234,16 @@ impl<T> Node<T> {
             None
         } else {
             Some((&*self.parent, self.child_idx as usize))
+        }
+    }
+
+    /// # Safety
+    /// Must ensure parent isn't being modified
+    pub unsafe fn parent_mut_and_idx(&mut self) -> Option<(&mut Node<T>, usize)> {
+        if self.parent.is_null() {
+            None
+        } else {
+            Some((&mut *(self.parent as *mut _), self.child_idx as usize))
         }
     }
 

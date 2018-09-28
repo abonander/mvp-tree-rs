@@ -57,18 +57,19 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
 
             let distances = node.get_distances(&item, &dist_fn);
 
-            if node.is_leaf() {
-                // node is leaf and full
-                if node.has_parent() && node.child_idx() == NODE_SIZE {
-                    // we are the far right leaf child -- add a parent to our parent node
-                    // safe because we're not modifying the tree at any other point
-                    unsafe { node.parent_mut().add_child(item, &distances) };
-                    return depth;
-                } else {
-                    // make the node internal, increasing the depth by 1
-                    node.make_internal(item, &distances);
-                    return depth + 1;
+            if node.is_leaf() { // && node.is_full()
+                // safe because we're not modifying the tree at any other point
+                if let Some((parent, NODE_SIZE)) = unsafe { node.parent_mut_and_idx() } {
+                    if !parent.is_full() {
+                        // we are the far right leaf child of a non-full parent
+                        parent.add_child(item, &distances);
+                        return depth;
+                    }
                 }
+
+                // make the node internal, increasing the depth by 1
+                node.make_internal(item, &distances);
+                return depth + 1;
             }
 
             if let Some(child_idx) = node.find_parent(&distances) {
