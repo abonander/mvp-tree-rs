@@ -6,6 +6,7 @@ use mvp_tree::MvpTree;
 
 fuzz_target!(|data: &[u8]| {
     let mut words = data.chunks(2)
+        .filter(|chunk| chunk.len() == 2)
         .map(|chunk| (chunk[0] as u16 | (chunk[1] as u16) << 8))
         .collect::<Vec<_>>();
 
