@@ -360,6 +360,11 @@ fn one_level() {
         tree.iter().cloned().collect::<Vec<_>>(),
         (0 .. NODE_SIZE as u64).collect::<Vec<_>>()
     );
+
+    assert_eq!(
+        tree.iter_mut().map(|x| *x).collect::<Vec<_>>(),
+        (0 .. NODE_SIZE as u64).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -450,6 +455,20 @@ fn test_iter() {
     }
 }
 
+#[test]
+fn test_iter_mut() {
+    use std::collections::HashSet;
+
+    let len = 100;
+
+    let mut tree = MvpTree::new(compare);
+    tree.extend(0 .. len);
+    let mut set = (0 .. len).collect::<HashSet<u64>>();
+
+    for val in tree.iter_mut() {
+        assert!(set.remove(&val), "val returned multiple times from iterator: {}", val);
+    }
+}
 
 #[cfg(test)]
 fn compare_bits(left: &u32, right: &u32) -> u64 {
