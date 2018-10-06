@@ -9,6 +9,48 @@ mod node;
 
 use node::{Node, NODE_SIZE};
 
+/// A n-ary tree which organizes items based on a distance metric.
+///
+/// Like a B-tree is a generalization of a binary tree, this is a generalization of
+/// a [vantage-point (VP) tree][vp-tree-wiki] to multiple items per node. Unlike a binary search
+/// tree, a vantage-point tree does not require its contents to implement any kind of ordering or
+/// equality; instead, a single distance function is provided and elements are organized purely
+/// based on their distances to one another.
+///
+/// This is useful for data with a very high dimensionality such that a regular ordering
+/// is difficult to define or is simply not meaningful. The originally intended use-case of this
+/// implementation is to organize, by Hamming distance (`left ^ right`, count one-bits),
+/// image perceptual hash bitstrings created by [the `img_hash` crate][img_hash].
+/// The equivalent k-d tree would need as many dimensions as there are bits in the hashes.
+///
+/// Because equality is not required, this tree does not implement a map or set interface.
+/// In some use-cases like the one mentioned above (the perceptual hash is only an
+/// approximation of the image content; hashes can be equal while the images are quite different),
+/// elements can have a 0 distance and not actually be equivalent.
+///
+/// The primary operation this tree is designed to support is [k-nearest-neighbor search][kNN],
+/// finding the `k` elements closest to a given item in distance; the item itself may or may not
+/// reside within the tree.
+///
+/// ### Distance Function
+/// A distance function is required upon the construction of the tree, which will be used
+/// to organize elements as they are added to the tree. Some academic sources for (M)VP-trees
+/// describe this distance function as necessarily being a [Euclidean metric] but the author
+/// of this crate is not currently sure if this is a hard requirement for the algorithm.
+///
+/// The properties the distance function certainly must have are as follows:
+///
+/// * reflexive: `dist(a, a)` must be 0
+/// * deterministic: `dist(a, b)` must always return the same value for the same inputs
+/// * commutative: `dist(a, b) == dist(b, a)`
+/// * (unknown term): `dist(a, b) + dist(b, c) >= dist(a, c)`; the shortest distance between
+/// two points (items) must be a straight line; no wormholes allowed
+/// (this property may actually make the distance function into a Euclidean metric)
+///
+/// [vp-tree-wiki]: https://en.wikipedia.org/wiki/Vantage-point_tree
+/// [img_hash]: https://crates.io/crates/img_hash
+/// [kNN]: https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm
+/// [Euclidean metric]: https://en.wikipedia.org/wiki/Euclidean_distance
 pub struct MvpTree<T, Df> {
     // must be boxed so it has a stable address
     root: Option<Box<Node<T>>>,
@@ -27,10 +69,14 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         }
     }
 
+    /// The number of items in this tree.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// The current maximum height of the tree.
+    ///
+    /// This is roughly proportional to the maximum time it takes to access an item the tree.
     pub fn height(&self) -> usize {
         self.height
     }
@@ -87,6 +133,12 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         self.height = cmp::max(self.height, insert_depth + 1);
     }
 
+    /// Search the tree for the `k` closest items to the given item, based
+    /// on the distance function the tree was constructed with.
+    ///
+    /// This ignores `item` itself if it resides within the tree, as determined
+    /// by referential equality (`std::ptr::eq()`). It is expected that
+    /// the meaning of a 0 distance will vary based on context so `==` is not used.
     // noinspection RsNeedlessLifetimes inspection wants us to elide `'a` here but
     // we don't want to require `item` to live as long as `'a` since it's not returned
     pub fn k_nearest<'a>(&'a self, k: usize, item: &T) -> Vec<Neighbor<'a, T>> {
@@ -523,6 +575,7 @@ fn test_knn() {
     }
 }
 
+#[cfg(fuzzing)]
 pub fn fuzz_iter(data: &[u8]) {
     let mut words = data.chunks(2)
         .filter(|chunk| chunk.len() == 2)

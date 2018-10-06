@@ -74,7 +74,6 @@ impl<T> Node<T> {
 
     /// Repartition the leaf elements of this full node given the new item
     /// and distances from it to the current elements of the node (given by `get_distances`)
-    #[must_use="ejected item from full node that needs to be reinserted"]
     pub fn make_internal(&mut self, mut item: T, distances: &Distances) {
         assert!(self.is_leaf(), "attempting to make internal node internal again");
         assert_eq!(self.len(), NODE_SIZE, "trying to make non-full leaf node internal");
