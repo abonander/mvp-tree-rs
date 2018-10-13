@@ -522,7 +522,6 @@ fn test_iter_mut() {
     }
 }
 
-#[cfg(test)]
 fn compare_bits(left: &u32, right: &u32) -> u64 {
     (left ^ right).count_ones() as u64
 }
@@ -575,14 +574,27 @@ fn test_knn() {
     }
 }
 
-#[cfg(fuzzing)]
-pub fn fuzz_iter(data: &[u8]) {
-    let mut words = data.chunks(2)
+// reinterpret fuzz input data as 16 bits to increase number of possible values
+fn bytes_to_words(bytes: &[u8]) -> Vec<u16> {
+    data.chunks(2)
         .filter(|chunk| chunk.len() == 2)
         .map(|chunk| (chunk[0] as u16 | (chunk[1] as u16) << 8))
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
-    let mut tree = MvpTree::new(|&l: &u16, &r| (l ^ r).count_ones() as u64);
+fn compare_u16(l: &u16, r: &u16) -> u64 {
+    if l < r {
+        (r - l) as u64
+    } else {
+        (l - r) as u64
+    }
+}
+
+#[doc(hidden)]
+pub fn fuzz_iter(data: &[u8]) {
+    let mut words = bytes_to_words(data);
+
+    let mut tree = MvpTree::new(compare_u16);
     tree.extend(words.iter().cloned());
     words.sort();
 
@@ -590,4 +602,32 @@ pub fn fuzz_iter(data: &[u8]) {
     words_test.sort();
 
     assert_eq!(words, words_test);
+}
+
+#[doc(hidden)]
+pub fn fuzz_knn(data: &[u8]) {
+    let mut words = bytes_to_words(data);
+
+    if words.len() < 2 { return }
+
+    let k = words[0] as usize;
+    let search_for = words[1];
+
+    words = words.split_off(2);
+
+    let mut tree = MvpTree::new(compare_u16);
+    tree.extend(words.iter().cloned());
+    words.sort();
+
+    // if the fuzzer duplicates `search_for` in the set it should be returned
+    let neighbors = tree.k_nearest(k, &search_for);
+
+    if words.len() < k {
+        assert_eq!(neighbors.len(), words.len());
+    }
+
+    // TODO:
+    // assert each neighbor is contained in the set
+    // assert each neighbor is the right distance away
+    // assert that there are no neighbors closer than the greatest distance that weren't covered
 }
