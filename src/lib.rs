@@ -82,13 +82,12 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     }
 
     pub fn insert(&mut self, mut item: T) {
-        let new_len = self.len.checked_add(1).expect("overflow `self.len + 1`");
-
         if let None = self.root {
             let mut root = Node::new_box();
             root.push_item(item);
             self.root = Some(root);
             self.height = 1;
+            self.len = 1;
             return;
         }
 
@@ -125,6 +124,8 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
 
             find_insert(node.far_right_child_mut(), item, dist_fn, depth + 1)
         }
+
+        let new_len = self.len.checked_add(1).expect("overflow `self.len + 1`");
 
         let mut node = &mut **self.root.as_mut().unwrap();
         let insert_depth = find_insert(node, item, &self.dist_fn, 0);
