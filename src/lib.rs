@@ -576,7 +576,7 @@ fn test_knn() {
 
 // reinterpret fuzz input data as 16 bits to increase number of possible values
 fn bytes_to_words(bytes: &[u8]) -> Vec<u16> {
-    data.chunks(2)
+    bytes.chunks(2)
         .filter(|chunk| chunk.len() == 2)
         .map(|chunk| (chunk[0] as u16 | (chunk[1] as u16) << 8))
         .collect::<Vec<_>>()
@@ -613,6 +613,8 @@ pub fn fuzz_knn(data: &[u8]) {
     let k = words[0] as usize;
     let search_for = words[1];
 
+    if k == 0 { return; }
+
     words = words.split_off(2);
 
     let mut tree = MvpTree::new(compare_u16);
@@ -624,10 +626,28 @@ pub fn fuzz_knn(data: &[u8]) {
 
     if words.len() < k {
         assert_eq!(neighbors.len(), words.len());
+    } else {
+        assert_eq!(neighbors.len(), k);
     }
 
-    // TODO:
     // assert each neighbor is contained in the set
-    // assert each neighbor is the right distance away
+    for neighbor in &neighbors {
+        let idx = words.binary_search(neighbor.item)
+            .expect(&format!("neighbor not in original set: {:?}", neighbor));
+
+        words.remove(idx);
+
+        // assert each neighbor is the right distance away
+        assert_eq!(compare_u16(neighbor.item, &search_for), neighbor.dist);
+    }
+
+    let farthest = neighbors.last().unwrap();
+
     // assert that there are no neighbors closer than the greatest distance that weren't covered
+    for word in &words {
+        let dist = compare_u16(farthest.item, word);
+        assert!(dist >= farthest.dist,
+                "uncovered closer neighbor than farthest, {:?} ({:?}) < {:?}",
+                word, dist, farthest);
+    }
 }
