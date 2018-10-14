@@ -82,7 +82,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     }
 
     pub fn insert(&mut self, mut item: T) {
-        self.len = self.len.checked_add(1).expect("overflow `self.len + 1`");
+        let new_len = self.len.checked_add(1).expect("overflow `self.len + 1`");
 
         if let None = self.root {
             let mut root = Node::new_box();
@@ -131,6 +131,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
 
         // update the height if it increased
         self.height = cmp::max(self.height, insert_depth + 1);
+        self.len = new_len;
     }
 
     /// Search the tree for the `k` closest items to the given item, based
@@ -355,24 +356,24 @@ impl<'i, 'n, T: 'i + 'n, Df> KnnVisitor<'i, 'n, T, Df> where Df: Fn(&T, &T) -> u
             }
         } else {
             for (idx, ((item, &dist), &radius)) in items_dists.zip(node.radii()).enumerate() {
-                if dist <= radius {
+                if self.should_visit(dist, radius) {
                     if !node.is_removed(idx) {
                         self.push_heap(item, dist);
                     }
 
                     self.visit(node.child(idx));
-
-                    // if we haven't reached `k` neighbors or the farthest neighbor is further
-                    // than `|dist - radius|`, attempt to visit the next child in line
-                    let max_dist = self.neighbors.peek().map_or(0, |n| n.dist);
-                    if self.neighbors.len() == self.k && max_dist < pos_diff(dist, radius) {
-                        return;
-                    }
                 }
             }
 
+            // always visit the far right child
             self.visit(node.far_right_child());
         }
+    }
+
+    fn should_visit(&self, dist: u64, radius: u64) -> bool {
+        dist <= radius || self.neighbors.peek().map_or(true, |n| {
+            self.neighbors.len() < self.k || n.dist > pos_diff(dist, radius)
+        })
     }
 }
 
