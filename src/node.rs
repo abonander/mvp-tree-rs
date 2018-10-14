@@ -273,6 +273,9 @@ impl<T> Node<T> {
     }
 }
 
+unsafe impl<T: Send> Send for Node<T> {}
+unsafe impl<T: Sync> Sync for Node<T> {}
+
 impl<T> Drop for Node<T> {
     fn drop(&mut self) {
         self.parent = ptr::null();

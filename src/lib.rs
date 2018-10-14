@@ -23,6 +23,13 @@ use node::{Node, NODE_SIZE};
 /// image perceptual hash bitstrings created by [the `img_hash` crate][img_hash].
 /// The equivalent k-d tree would need as many dimensions as there are bits in the hashes.
 ///
+/// At a high level, each node has a radius chosen from the median of its distances to some number
+/// of the previously inserted items. Items that fall within this radius are inserted into
+/// the left child of the node while items that fall outside are inserted into the right
+/// child. A multiple-vantage-point (MVP) tree has several items per node, each with its own
+/// radius; an insertion or a search finds the first item in the node from the left that contains
+/// the searched-for item within its radius.
+///
 /// Because equality is not required, this tree does not implement a map or set interface.
 /// In some use-cases like the one mentioned above (the perceptual hash is only an
 /// approximation of the image content; hashes can be equal while the images are quite different),
@@ -47,6 +54,43 @@ use node::{Node, NODE_SIZE};
 /// two points (items) must be a straight line; no wormholes allowed
 /// (this property may actually make the distance function into a Euclidean metric)
 ///
+/// It is a logic error to mutate an item (via mutable references or internally mutable containers
+/// like `Cell` and `RefCell` or unsafe code) in a way that changes its distances to other items in
+/// the tree. Distance should also not be based on global mutable state or I/O (non-deterministic).
+///
+/// ### Note: Not Self-Balancing
+/// The swaps and rotations that binary/B-trees perform to balance themselves are
+/// not really feasible with a vantage-point tree as every node is organized
+/// based on the distance to its parent. Swapping another node into a parent
+/// would require recalculating the distances of all its children.
+///
+/// Vantage-point trees are typically designed to be constructed from a complete
+/// set of data such that they can choose reasonable radii for internal nodes
+/// by finding the median of the distances from one item to the rest of the dataset.
+///
+/// This MVP tree is designed instead to allow dynamic construction like other Rust
+/// collections. Instead of calculating the median distances to large portions of the set,
+/// it only chooses radii from the distances to a small set of items, typically the `~n` previously
+/// inserted items. This means that if your dataset has a low entropy, e.g. items are inserted
+/// in clusters where they have small distances to each other or are in some sort of ordering,
+/// the resulting tree structure will be suboptimal for fast searches and insertions.
+///
+/// A simple example of a degenerate case is inserting items in order of their distance to each
+/// other:
+///
+/// ```rust
+/// # use mvp_tree::MvpTree;
+/// let mut tree = MvpTree::new(|l, r| (l - r).abs());
+/// // since the following items are all going to be outside the pivot and radius picked for the
+/// // first node, the tree will be lopsided with long branches on its right side
+/// tree.extend(0i32 .. 50);
+/// ```
+///
+/// Since real-world data is expected to not sort so cleanly (e.g. Hamming distances of image
+/// hashes) the tree makes no real effort to counter this. If you are concerned about degenerate
+/// cases (maybe using the tree with untrusted data) then you may want to shuffle your inputs
+/// somehow.
+///
 /// [vp-tree-wiki]: https://en.wikipedia.org/wiki/Vantage-point_tree
 /// [img_hash]: https://crates.io/crates/img_hash
 /// [kNN]: https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm
@@ -60,6 +104,9 @@ pub struct MvpTree<T, Df> {
 }
 
 impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
+    /// Construct an empty tree with the given distance function.
+    ///
+    /// See the [Distance Function](#distance-function) header above for more information.
     pub fn new(dist_fn: Df) -> Self {
         MvpTree {
             root: None,
@@ -76,11 +123,14 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
 
     /// The current maximum height of the tree.
     ///
-    /// This is roughly proportional to the maximum time it takes to access an item the tree.
+    /// This is roughly proportional to the maximum time it takes to access a node in the tree.
     pub fn height(&self) -> usize {
         self.height
     }
 
+    /// Insert `item` into the tree based on the distance function provided at construction.
+    ///
+    /// See the [note about balancing](#note-not-self-balancing) above.
     pub fn insert(&mut self, mut item: T) {
         if let None = self.root {
             let mut root = Node::new_box();
@@ -138,9 +188,12 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     /// Search the tree for the `k` closest items to the given item, based
     /// on the distance function the tree was constructed with.
     ///
+    /// Neighbors are sorted in ascending order based on distance to `item`.
+    ///
     /// This ignores `item` itself if it resides within the tree, as determined
-    /// by referential equality (`std::ptr::eq()`). It is expected that
-    /// the meaning of a 0 distance will vary based on context so `==` is not used.
+    /// by referential equality (`std::ptr::eq()`, i.e. if `item` and the item in the tree
+    /// have the same runtime pointer value). It is expected that the meaning of a 0 distance will
+    /// vary based on context so the tree does not assume that a 0 distance means equality.
     // noinspection RsNeedlessLifetimes inspection wants us to elide `'a` here but
     // we don't want to require `item` to live as long as `'a` since it's not returned
     pub fn k_nearest<'a>(&'a self, k: usize, item: &T) -> Vec<Neighbor<'a, T>> {
@@ -163,6 +216,14 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         visitor.neighbors.into_sorted_vec()
     }
 
+    /// Get an iterator that returns immutable references to items in this tree.
+    ///
+    /// The iteration order is unspecified but deterministic.
+    ///
+    /// ### Note
+    /// It is a logic error to mutate an item (via mutable references or internally mutable
+    /// containers like `Cell` and `RefCell` or unsafe code) in a way that changes its distances to
+    /// other items in the tree.
     pub fn iter(&self) -> Iter<T> {
         Iter {
             dfs: DepthFirst::new(&self.root),
@@ -171,6 +232,14 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         }
     }
 
+    /// Get an iterator that returns mutable references to items in this tree.
+    ///
+    /// The iteration order is unspecified but deterministic.
+    ///
+    /// ### Note
+    /// It is a logic error to mutate an item (via mutable references or internally mutable
+    /// containers like `Cell` and `RefCell` or unsafe code) in a way that changes its distances to
+    /// other items in the tree.
     pub fn iter_mut(&mut self) -> IterMut<T> {
         IterMut {
             dfs: DepthFirst::new(&self.root),
@@ -188,9 +257,12 @@ impl<T, Df> Extend<T> for MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     }
 }
 
+/// Item returned by [`MvpTree::k_nearest()`](MvpTree::k_nearest).
 #[derive(Debug)]
 pub struct Neighbor<'a, T: 'a> {
+    /// The distance from `item` to the item passed to `k_nearest()`.
     pub dist: u64,
+    /// The item this instance concerns.
     pub item: &'a T,
     _compat: (),
 }
@@ -219,6 +291,14 @@ impl<'a, T: 'a + PartialEq<T>> PartialEq<T> for Neighbor<'a, T> {
     fn eq(&self, other: &T) -> bool { *self.item == *other }
 }
 
+/// Immtable iterator for `MvpTree`.
+///
+/// The iteration order is unspecified but deterministic.
+///
+/// ### Note
+/// It is a logic error to mutate an item (via mutable references or internally mutable
+/// containers like `Cell` and `RefCell` or unsafe code) in a way that changes its distances to
+/// other items in the tree.
 pub struct Iter<'a, T: 'a> {
     dfs: DepthFirst<T>,
     items: Option<node::FilteredItems<'a, T>>,
@@ -242,6 +322,14 @@ impl<'a, T: 'a> Iterator for Iter<'a, T> {
     }
 }
 
+/// Mutable iterator for `MvpTree`.
+///
+/// The iteration order is unspecified but deterministic.
+///
+/// ### Note
+/// It is a logic error to mutate an item (via mutable references or internally mutable
+/// containers like `Cell` and `RefCell` or unsafe code) in a way that changes its distances to
+/// other items in the tree.
 pub struct IterMut<'a, T: 'a> {
     dfs: DepthFirst<T>,
     items: Option<node::FilteredItemsMut<'a, T>>,
