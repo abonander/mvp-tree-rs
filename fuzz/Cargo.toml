@@ -20,3 +20,7 @@ members = ["."]
 [[bin]]
 name = "tree_iter"
 path = "fuzz_targets/tree_iter.rs"
+
+[[bin]]
+name = "tree_knn"
+path = "fuzz_targets/tree_knn.rs"
