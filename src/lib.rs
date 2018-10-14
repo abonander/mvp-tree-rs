@@ -647,7 +647,7 @@ pub fn fuzz_knn(data: &[u8]) {
 
     // assert that there are no neighbors closer than the greatest distance that weren't covered
     for word in &words {
-        let dist = compare_u16(farthest.item, word);
+        let dist = compare_u16(farthest.item, &search_for);
         assert!(dist >= farthest.dist,
                 "uncovered closer neighbor than farthest, {:?} ({:?}) < {:?}",
                 word, dist, farthest);
