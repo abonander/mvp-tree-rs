@@ -641,6 +641,8 @@ pub fn fuzz_knn(data: &[u8]) {
         assert_eq!(compare_u16(neighbor.item, &search_for), neighbor.dist);
     }
 
+    if neighbors.is_empty() { return }
+
     let farthest = neighbors.last().unwrap();
 
     // assert that there are no neighbors closer than the greatest distance that weren't covered
