@@ -17,5 +17,7 @@ fn main() {
         stdin.lock().read_to_end(&mut data).expect("failed to read data from stdin");
     }
 
+    println!("input data:\n{:?}", data);
+
     mvp_tree::fuzz_knn(&data);
 }
