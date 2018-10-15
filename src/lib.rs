@@ -404,6 +404,55 @@ impl<T> DepthFirst<T> {
     }
 }
 
+struct BreadthFirst<T> {
+    node: *const Node<T>,
+    depth: usize,
+    max_depth: usize,
+}
+
+impl<T> BreadthFirst<T> {
+    fn new(root: &Option<Box<Node<T>>>) -> Self {
+        BreadthFirst {
+            node: root.as_ref().map_or(ptr::null(), |r| &**r),
+            depth: 0,
+            max_depth: 0,
+        }
+    }
+
+    // NULLABLE
+    unsafe fn next(&mut self) -> *const Node<T> {
+        if self.node.is_null() {
+            return self.node;
+        }
+
+        while !(*self.node).is_leaf() && self.depth < self.max_depth {
+            self.node = (*self.node).child(0);
+            self.depth += 1;
+        }
+
+        let ret_node = self.node;
+
+        while let Some((parent, child_idx)) = (*self.node).parent_and_idx() {
+            if child_idx + 1 == (*self.node).len() {
+                self.node = (*self.node).far_right_child();
+                break;
+            } else if child_idx < (*self.node).len() {
+                self.node = (*self.node).child(child_idx + 1);
+                break;
+            } else {
+                self.node = parent;
+                self.depth -= 1;
+            }
+        }
+
+        if !(*self.node).has_parent() {
+            self.max_depth += 1;
+        }
+
+        ret_node
+    }
+}
+
 struct KnnVisitor<'i, 'n, T: 'i + 'n, Df> {
     item: &'i T,
     dist_fn: Df,
