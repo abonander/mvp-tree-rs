@@ -1,9 +1,10 @@
+//! A n-ary tree which organizes items based on a distance metric.
+#![deny(missing_docs)]
 
 use std::cmp::{self, Ordering};
 use std::collections::BinaryHeap;
 use std::marker::PhantomData;
-use std::ptr::{self, NonNull};
-use std::{mem, slice};
+use std::{fmt, ptr};
 
 mod node;
 
@@ -131,7 +132,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     /// Insert `item` into the tree based on the distance function provided at construction.
     ///
     /// See the [note about balancing](#note-not-self-balancing) above.
-    pub fn insert(&mut self, mut item: T) {
+    pub fn insert(&mut self, item: T) {
         if let None = self.root {
             let mut root = Node::new_box();
             root.push_item(item);
@@ -177,7 +178,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
 
         let new_len = self.len.checked_add(1).expect("overflow `self.len + 1`");
 
-        let mut node = &mut **self.root.as_mut().unwrap();
+        let node = &mut **self.root.as_mut().unwrap();
         let insert_depth = find_insert(node, item, &self.dist_fn, 0);
 
         // update the height if it increased
@@ -205,7 +206,7 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         };
 
         // don't allocate if the tree is empty
-        let mut neighbors = BinaryHeap::with_capacity(k);
+        let neighbors = BinaryHeap::with_capacity(k);
 
         let mut visitor = KnnVisitor {
             neighbors, item, k, dist_fn: &self.dist_fn,
@@ -214,6 +215,15 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         visitor.visit(root);
 
         visitor.neighbors.into_sorted_vec()
+    }
+
+    /// Returns an `impl Debug` that prints the tree's structure.
+    ///
+    /// The output format is unspecified.
+    pub fn print_structure<'t>(&'t self) -> impl fmt::Debug + 't where T: fmt::Debug {
+        TreePrinter {
+            root: &self.root
+        }
     }
 
     /// Get an iterator that returns immutable references to items in this tree.
@@ -425,31 +435,99 @@ impl<T> BreadthFirst<T> {
             return self.node;
         }
 
-        while !(*self.node).is_leaf() && self.depth < self.max_depth {
-            self.node = (*self.node).child(0);
-            self.depth += 1;
-        }
-
-        let ret_node = self.node;
-
-        while let Some((parent, child_idx)) = (*self.node).parent_and_idx() {
-            if child_idx + 1 == (*self.node).len() {
-                self.node = (*self.node).far_right_child();
-                break;
-            } else if child_idx < (*self.node).len() {
-                self.node = (*self.node).child(child_idx + 1);
-                break;
-            } else {
-                self.node = parent;
-                self.depth -= 1;
+        loop {
+            while !(*self.node).is_leaf() && self.depth < self.max_depth {
+                self.node = (*self.node).child(0);
+                self.depth += 1;
             }
+
+            let depth_reached = self.depth == self.max_depth;
+            let ret_node = self.node;
+
+            while let Some((parent, child_idx)) = (*self.node).parent_and_idx() {
+                // if we're at the right depth, pivot to the next child
+                if child_idx + 1 == parent.len() {
+                    self.node = parent.far_right_child();
+                    break;
+                } else if child_idx < parent.len() {
+                    self.node = parent.child(child_idx + 1);
+                    break;
+                } else {
+                    // ascend so we can pivot to the parent's siblings
+                    self.node = parent;
+                    self.depth -= 1;
+                }
+            }
+
+            if !(*self.node).has_parent() {
+                self.max_depth += 1;
+
+                if !depth_reached {
+                    self.node = ptr::null();
+                    return self.node;
+                }
+            }
+
+            if depth_reached {
+                return ret_node;
+            }
+
+            // otherwise our descent terminated early on a leaf node and we need to continue
+        }
+    }
+}
+
+struct TreePrinter<'a, T> {
+    root: &'a Option<Box<Node<T>>>,
+}
+
+impl<'a, T: fmt::Debug + 'a> fmt::Debug for TreePrinter<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut bfs = BreadthFirst::new(self.root);
+        let mut last_depth = 0;
+
+        while let Some(node) = unsafe { bfs.next().as_ref() } {
+            if bfs.depth != last_depth {
+                last_depth = bfs.depth;
+                writeln!(f, "")?;
+            }
+
+            //
+            if !node.has_parent() {
+                print_node(node, f)?;
+                writeln!(f, "")?;
+            }
+
+            if node.is_leaf() { continue }
+
+            for i in 0 .. node.len() {
+                print_node(node.child(i), f)?;
+                write!(f, " ")?;
+            }
+
+            print_node(node.far_right_child(), f)?;
         }
 
-        if !(*self.node).has_parent() {
-            self.max_depth += 1;
+        Ok(())
+    }
+}
+
+fn print_node<T: fmt::Debug>(node: &Node<T>, f: &mut fmt::Formatter) -> fmt::Result {
+    if node.is_leaf() {
+        f.debug_list().entries(node.items()).finish()
+    } else {
+        write!(f, "[ ")?;
+        let mut prev = false;
+        for (item, radius) in node.items().iter().zip(node.radii()) {
+            if prev {
+                write!(f, ", ")?;
+            }
+            prev = true;
+
+            write!(f, "{:?} ({})", item, radius)?;
         }
 
-        ret_node
+        write!(f, " ]")
     }
 }
 
@@ -629,6 +707,38 @@ fn test_dfs() {
             panic!("DepthFirst returned duplicate node");
         }
     }
+}
+
+#[test]
+fn test_bfs() {
+    use std::collections::HashSet;
+
+    let len = 100;
+
+    let mut tree = MvpTree::new(compare);
+    tree.extend(0 .. len);
+
+    let mut bfs = BreadthFirst::new(&tree.root);
+    let mut set = HashSet::new();
+    let mut items: HashSet<_> = (0 .. len).collect();
+
+    loop {
+        let ptr = unsafe { bfs.next() };
+
+        if ptr.is_null() { break; }
+
+        // not assert so we have an inner source line to break on
+        if !set.insert(ptr) {
+            panic!("BreadthFirst returned duplicate node");
+        }
+
+        for item in unsafe { (*ptr).items() } {
+            assert!(items.remove(item), "item missing from set: {:?}", item);
+        }
+    }
+
+    assert!(!set.is_empty(), "BreadthFirst returned nothing!");
+    assert!(items.is_empty(), "remaining items: {:?}", items);
 }
 
 #[test]

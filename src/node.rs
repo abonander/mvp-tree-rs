@@ -1,10 +1,7 @@
-use std::alloc::{self, Layout};
 use std::mem::{self, ManuallyDrop};
-use std::ops::{Deref, DerefMut};
-use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::iter::Enumerate;
-use std::slice;
+use std::{ptr, slice};
 
 // cardinality of the tree
 // the `u8` type saves memory as our values never exceed NODE_SIZE + 1
@@ -108,10 +105,7 @@ impl<T> Node<T> {
         assert!(!self.is_leaf(), "attempting to add child to leaf node; use make_internal()");
         assert!(self.far_right_child().is_full(),
                 "attempting to add child with non-full right child");
-        if self.len() == NODE_SIZE {
-            1 + 1;
-            panic!("attempting to add child to full node");
-        }
+        assert_ne!(self.len(), NODE_SIZE, "attempting to add child to full node");
 
         let radius = get_median(child_distances);
         let len = self.len as usize;
