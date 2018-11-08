@@ -487,6 +487,8 @@ impl<'a, T: fmt::Debug + 'a> fmt::Debug for TreePrinter<'a, T> {
         let mut last_depth = 0;
 
         while let Some(node) = unsafe { bfs.next().as_ref() } {
+            if node.is_leaf() { continue }
+
             if bfs.depth != last_depth {
                 last_depth = bfs.depth;
                 writeln!(f, "")?;
@@ -497,8 +499,6 @@ impl<'a, T: fmt::Debug + 'a> fmt::Debug for TreePrinter<'a, T> {
                 print_node(node, f)?;
                 writeln!(f, "")?;
             }
-
-            if node.is_leaf() { continue }
 
             for i in 0 .. node.len() {
                 print_node(node.child(i), f)?;
@@ -516,7 +516,7 @@ fn print_node<T: fmt::Debug>(node: &Node<T>, f: &mut fmt::Formatter) -> fmt::Res
     if node.is_leaf() {
         f.debug_list().entries(node.items()).finish()
     } else {
-        write!(f, "[ ")?;
+        write!(f, "[")?;
         let mut prev = false;
         for (item, radius) in node.items().iter().zip(node.radii()) {
             if prev {
@@ -527,7 +527,7 @@ fn print_node<T: fmt::Debug>(node: &Node<T>, f: &mut fmt::Formatter) -> fmt::Res
             write!(f, "{:?} ({})", item, radius)?;
         }
 
-        write!(f, " ]")
+        write!(f, "]")
     }
 }
 
@@ -683,6 +683,14 @@ fn two_levels() {
     let child_5 = root.far_right_child();
     assert_eq!(child_5.items(), &[55, 56, 57, 58, 59]);
     assert!(child_5.is_leaf());
+
+    let printed = format!("{:?}", tree.print_structure());
+    assert_eq!(
+        printed,
+        "[5 (5), 16 (5), 27 (5), 38 (5), 49 (5)]\n\
+         [0, 1, 2, 6, 7] [11, 12, 13, 17, 18] [22, 23, 24, 28, 29] [33, 34, 35, 39, 40] \
+         [44, 45, 46, 50, 51] [55, 56, 57, 58, 59]"
+    );
 }
 
 #[test]
