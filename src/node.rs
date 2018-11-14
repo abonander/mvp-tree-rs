@@ -19,8 +19,6 @@ pub struct Node<T> {
     /// valid up to `len`
     items: ManuallyDrop<NodeArray<T>>,
     len: u8,
-    /// valid up to `len`
-    removed: AtomicBitSet,
     is_leaf: bool,
     /// if `!is_leaf`, `0 .. len` and `NODE_SIZE` indices are initialized
     children: ChildArray<T>,
@@ -38,7 +36,6 @@ impl<T> Node<T> {
             // FIXME: use `MaybeUninit` when stable to avoid copying garbage data
             items: unsafe { mem::zeroed() },
             len: 0,
-            removed: Default::default(),
             is_leaf: true,
             children: [ptr::null_mut(); CHILD_SIZE],
             radii: [0; NODE_SIZE],
@@ -160,24 +157,6 @@ impl<T> Node<T> {
         &mut self.items[..self.len as usize]
     }
 
-    pub fn is_removed(&self, idx: usize) -> bool {
-        is_removed(&self.removed, idx)
-    }
-
-    pub fn filtered_items(&self) -> FilteredItems<T> {
-        FilteredItems {
-            items: self.items[..self.len as usize].iter().enumerate(),
-            removed: &self.removed,
-        }
-    }
-
-    pub fn filtered_items_mut(&mut self) -> FilteredItemsMut<T> {
-        FilteredItemsMut {
-            items: self.items[..self.len as usize].iter_mut().enumerate(),
-            removed: &self.removed,
-        }
-    }
-
     pub fn child(&self, idx: usize) -> &Node<T> {
         assert!(!self.is_leaf(), "attempting to get child of leaf node");
         assert!(idx < self.len(), "idx out of bounds {} ({})", idx, self.len());
@@ -211,13 +190,6 @@ impl<T> Node<T> {
     pub fn child_idx(&self) -> usize {
         assert!(self.has_parent(), "child_idx() of root node");
         self.child_idx as usize
-    }
-
-    /// Atomically mark the item at `idx` as removed without removing it from the tree;
-    /// actually removing items would require significant restructuring of the tree
-    pub fn remove_item(&self, idx: usize) {
-        assert!(idx < self.len(), "attempt to remove item out of bounds: {}, {}", idx, self.len);
-        self.removed.fetch_or(1 << idx, Ordering::AcqRel);
     }
 
     /// # Safety
@@ -292,54 +264,6 @@ impl<T> Drop for Node<T> {
                 ptr::drop_in_place(item);
             }
         }
-    }
-}
-
-fn is_removed(removed: &AtomicBitSet, idx: usize) -> bool {
-    (removed.load(Ordering::Acquire) & (1 << idx)) != 0
-}
-
-pub struct FilteredItems<'a, T: 'a> {
-    items: Enumerate<slice::Iter<'a, T>>,
-    removed: &'a AtomicBitSet,
-}
-
-impl<'a, T: 'a> Iterator for FilteredItems<'a, T> {
-    type Item = (usize, &'a T);
-
-    fn next(&mut self) -> Option<(usize, &'a T)> {
-        let removed = self.removed;
-        self.items.by_ref()
-            .filter(|&(idx, _)| !is_removed(removed, idx))
-            .next()
-    }
-}
-
-impl<'a, T: 'a> FilteredItems<'a, T> {
-    pub fn is_empty(&self) -> bool {
-        self.items.len() == 0
-    }
-}
-
-pub struct FilteredItemsMut<'a, T: 'a> {
-    items: Enumerate<slice::IterMut<'a, T>>,
-    removed: &'a AtomicBitSet,
-}
-
-impl<'a, T: 'a> FilteredItemsMut<'a, T> {
-    pub fn is_empty(&self) -> bool {
-        self.items.len() == 0
-    }
-}
-
-impl<'a, T: 'a> Iterator for FilteredItemsMut<'a, T> {
-    type Item = (usize, &'a mut T);
-
-    fn next(&mut self) -> Option<(usize, &'a mut T)> {
-        let removed = self.removed;
-        self.items.by_ref()
-            .filter(|&(idx, _)| !is_removed(removed, idx))
-            .next()
     }
 }
 
