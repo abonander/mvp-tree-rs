@@ -4,7 +4,7 @@
 use std::cmp::{self, Ordering};
 use std::collections::BinaryHeap;
 use std::marker::PhantomData;
-use std::{fmt, ptr};
+use std::{fmt, ptr, slice};
 
 mod node;
 
@@ -81,7 +81,7 @@ use node::{Node, NODE_SIZE};
 ///
 /// ```rust
 /// # use mvp_tree::MvpTree;
-/// let mut tree = MvpTree::new(|l, r| (l - r).abs());
+/// let mut tree = MvpTree::new(|l: &i32, r| (l - r).abs() as u64);
 /// // since the following items are all going to be outside the pivot and radius picked for the
 /// // first node, the tree will be lopsided with long branches on its right side
 /// tree.extend(0i32 .. 50);
@@ -132,6 +132,8 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     /// Insert `item` into the tree based on the distance function provided at construction.
     ///
     /// See the [note about balancing](#note-not-self-balancing) above.
+    ///
+    /// For adding multiple items at once, use `.extend()`.
     pub fn insert(&mut self, item: T) {
         if let None = self.root {
             let mut root = Node::new_box();
@@ -217,15 +219,6 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         visitor.neighbors.into_sorted_vec()
     }
 
-    /// Returns an `impl Debug` that prints the tree's structure.
-    ///
-    /// The output format is unspecified.
-    pub fn print_structure<'t>(&'t self) -> impl fmt::Debug + 't where T: fmt::Debug {
-        TreePrinter {
-            root: &self.root
-        }
-    }
-
     /// Get an iterator that returns immutable references to items in this tree.
     ///
     /// The iteration order is unspecified but deterministic.
@@ -267,6 +260,16 @@ impl<T, Df> Extend<T> for MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     }
 }
 
+impl<T: fmt::Debug, Df> fmt::Debug for MvpTree<T, Df> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("MvpTree")
+            .field("len", &self.len)
+            .field("height", &self.height)
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
 /// Item returned by [`MvpTree::k_nearest()`](MvpTree::k_nearest).
 #[derive(Debug)]
 pub struct Neighbor<'a, T: 'a> {
@@ -301,7 +304,7 @@ impl<'a, T: 'a + PartialEq<T>> PartialEq<T> for Neighbor<'a, T> {
     fn eq(&self, other: &T) -> bool { *self.item == *other }
 }
 
-/// Immtable iterator for `MvpTree`.
+/// Immutable iterator for `MvpTree`.
 ///
 /// The iteration order is unspecified but deterministic.
 ///
@@ -311,7 +314,7 @@ impl<'a, T: 'a + PartialEq<T>> PartialEq<T> for Neighbor<'a, T> {
 /// other items in the tree.
 pub struct Iter<'a, T: 'a> {
     dfs: DepthFirst<T>,
-    items: Option<node::FilteredItems<'a, T>>,
+    items: Option<slice::Iter<'a, T>>,
     _borrow: PhantomData<&'a T>,
 }
 
@@ -320,13 +323,13 @@ impl<'a, T: 'a> Iterator for Iter<'a, T> {
 
     fn next(&mut self) -> Option<&'a T> {
         loop {
-            if let Some((_, next)) = self.items.as_mut().and_then(|i| i.next()) {
+            if let Some(next) = self.items.as_mut().and_then(|i| i.next()) {
                 return Some(next);
             }
 
             unsafe {
                 let next_node = self.dfs.next();
-                self.items = Some(next_node.as_ref()?.filtered_items());
+                self.items = Some(next_node.as_ref()?.items().iter());
             }
         }
     }
@@ -342,7 +345,7 @@ impl<'a, T: 'a> Iterator for Iter<'a, T> {
 /// other items in the tree.
 pub struct IterMut<'a, T: 'a> {
     dfs: DepthFirst<T>,
-    items: Option<node::FilteredItemsMut<'a, T>>,
+    items: Option<slice::IterMut<'a, T>>,
     _borrow: PhantomData<&'a mut T>,
 }
 
@@ -351,13 +354,13 @@ impl<'a, T: 'a> Iterator for IterMut<'a, T> {
 
     fn next(&mut self) -> Option<&'a mut T> {
         loop {
-            if let Some((_, next)) = self.items.as_mut().and_then(|i| i.next()) {
+            if let Some(next) = self.items.as_mut().and_then(|i| i.next()) {
                 return Some(next);
             }
 
             unsafe {
                 let next_node = self.dfs.next() as *mut Node<T>;
-                self.items = Some(next_node.as_mut()?.filtered_items_mut());
+                self.items = Some(next_node.as_mut()?.items_mut().iter_mut());
             }
         }
     }
@@ -477,60 +480,6 @@ impl<T> BreadthFirst<T> {
     }
 }
 
-struct TreePrinter<'a, T> {
-    root: &'a Option<Box<Node<T>>>,
-}
-
-impl<'a, T: fmt::Debug + 'a> fmt::Debug for TreePrinter<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut bfs = BreadthFirst::new(self.root);
-        let mut last_depth = 0;
-
-        while let Some(node) = unsafe { bfs.next().as_ref() } {
-            if node.is_leaf() { continue }
-
-            if bfs.depth != last_depth {
-                last_depth = bfs.depth;
-                writeln!(f, "")?;
-            }
-
-            //
-            if !node.has_parent() {
-                print_node(node, f)?;
-                writeln!(f, "")?;
-            }
-
-            for i in 0 .. node.len() {
-                print_node(node.child(i), f)?;
-                write!(f, " ")?;
-            }
-
-            print_node(node.far_right_child(), f)?;
-        }
-
-        Ok(())
-    }
-}
-
-fn print_node<T: fmt::Debug>(node: &Node<T>, f: &mut fmt::Formatter) -> fmt::Result {
-    if node.is_leaf() {
-        f.debug_list().entries(node.items()).finish()
-    } else {
-        write!(f, "[")?;
-        let mut prev = false;
-        for (item, radius) in node.items().iter().zip(node.radii()) {
-            if prev {
-                write!(f, ", ")?;
-            }
-            prev = true;
-
-            write!(f, "{:?} ({})", item, radius)?;
-        }
-
-        write!(f, "]")
-    }
-}
-
 struct KnnVisitor<'i, 'n, T: 'i + 'n, Df> {
     item: &'i T,
     dist_fn: Df,
@@ -566,17 +515,12 @@ impl<'i, 'n, T: 'i + 'n, Df> KnnVisitor<'i, 'n, T, Df> where Df: Fn(&T, &T) -> u
 
         if node.is_leaf() {
             for (idx, (item, &dist)) in items_dists.enumerate() {
-                if !node.is_removed(idx) {
-                    self.push_heap(item, dist);
-                }
+                self.push_heap(item, dist);
             }
         } else {
             for (idx, ((item, &dist), &radius)) in items_dists.zip(node.radii()).enumerate() {
                 if self.should_visit(dist, radius) {
-                    if !node.is_removed(idx) {
-                        self.push_heap(item, dist);
-                    }
-
+                    self.push_heap(item, dist);
                     self.visit(node.child(idx));
                 }
             }
@@ -683,14 +627,6 @@ fn two_levels() {
     let child_5 = root.far_right_child();
     assert_eq!(child_5.items(), &[55, 56, 57, 58, 59]);
     assert!(child_5.is_leaf());
-
-    let printed = format!("{:?}", tree.print_structure());
-    assert_eq!(
-        printed,
-        "[5 (5), 16 (5), 27 (5), 38 (5), 49 (5)]\n\
-         [0, 1, 2, 6, 7] [11, 12, 13, 17, 18] [22, 23, 24, 28, 29] [33, 34, 35, 39, 40] \
-         [44, 45, 46, 50, 51] [55, 56, 57, 58, 59]"
-    );
 }
 
 #[test]

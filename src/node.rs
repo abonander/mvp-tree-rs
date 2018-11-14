@@ -1,7 +1,7 @@
 use std::mem::{self, ManuallyDrop};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::iter::Enumerate;
-use std::{ptr, slice};
+use std::{fmt, ptr, slice};
 
 // cardinality of the tree
 // the `u8` type saves memory as our values never exceed NODE_SIZE + 1
@@ -236,6 +236,37 @@ impl<T> Node<T> {
 
     pub fn find_parent(&self, distances: &Distances) -> Option<usize> {
         self.radii().iter().zip(&distances[..]).position(|(rad, dist)| dist <= rad)
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Node<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("Node")
+            .field("items", &self.items());
+
+        if !self.is_leaf() {
+            debug_struct.field("radii", &self.radii())
+                .field("children", &DebugChildren { children: &self.children, len: self.len() });
+        }
+
+        debug_struct.finish()
+    }
+}
+
+struct DebugChildren<'a, T: 'a> {
+    children: &'a ChildArray<T>,
+    len: usize,
+}
+
+impl<'a, T: fmt::Debug> fmt::Debug for DebugChildren<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let children_iter = self.children[..self.len].iter()
+            .chain(self.children.last())
+            // INVARIANT:
+            // if we have safe access to this node then we have shared access to the children
+            .map(|c| unsafe { &*c });
+
+        f.debug_list().entries(children_iter).finish()
     }
 }
 
