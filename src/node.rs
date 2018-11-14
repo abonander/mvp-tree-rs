@@ -241,8 +241,9 @@ impl<T> Node<T> {
 
 impl<T: fmt::Debug> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut debug_struct = f.debug_struct("Node")
-            .field("items", &self.items());
+        let mut debug_struct = f.debug_struct("Node");
+
+        debug_struct.field("items", &self.items());
 
         if !self.is_leaf() {
             debug_struct.field("radii", &self.radii())
@@ -264,7 +265,7 @@ impl<'a, T: fmt::Debug> fmt::Debug for DebugChildren<'a, T> {
             .chain(self.children.last())
             // INVARIANT:
             // if we have safe access to this node then we have shared access to the children
-            .map(|c| unsafe { &*c });
+            .map(|c| unsafe { &**c });
 
         f.debug_list().entries(children_iter).finish()
     }
