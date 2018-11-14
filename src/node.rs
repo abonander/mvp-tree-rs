@@ -179,10 +179,23 @@ impl<T> Node<T> {
         unsafe { self.children[NODE_SIZE].as_mut().unwrap() }
     }
 
+    /// Remove `idx` from the node, returning it and its left child if this is not a leaf node,
+    /// or a null pointer otherwise.
+    pub fn remove(&mut self, idx: usize) -> (T, *mut Node<T>) {
+        let len = self.len();
+        assert!(idx < len, "idx out of bounds {} ({})", idx, len);
+        // both safe because we reduce the length by 1 afterward
+        let item = unsafe { shift_remove(self.items_mut(), idx) };
+        let child = unsafe { shift_remove(&mut self.children[..len], idx) };
+        self.len = (len - 1) as u8;
+        (item, child)
+    }
+
     pub fn has_parent(&self) -> bool {
         !self.parent.is_null()
     }
 
+    /// NULLABLE
     pub fn parent_ptr(&self) -> *const Node<T> {
         self.parent
     }
@@ -236,6 +249,34 @@ impl<T> Node<T> {
 
     pub fn find_parent(&self, distances: &Distances) -> Option<usize> {
         self.radii().iter().zip(&distances[..]).position(|(rad, dist)| dist <= rad)
+    }
+
+    /// Free empty children if this is a non-leaf and then drain the contained items
+    ///
+    /// ### Safety
+    /// The returned iterator is not bound by a lifetime, you must ensure it doesn't outlive
+    /// this `Node`
+    pub unsafe fn drain_items(&mut self) -> DrainItems<T> {
+        let len = self.len();
+        self.len = 0;
+        if !self.is_leaf() {
+            self.is_leaf = true;
+
+            for idx in (0 .. len).chain(Some(NODE_SIZE)) {
+                {
+                    let child = unsafe { &*self.children[idx] };
+                    assert_eq!(child.len(), 0, "draining items with nonempty children");
+                }
+
+                unsafe { drop(Box::from_raw(self.children[idx])); }
+                // as a check to ensure further access/drops will segfault
+                self.children[idx] = ptr::null_mut();
+            }
+        }
+
+        DrainItems {
+            items: unsafe { &mut self.items[..len] },
+        }
     }
 }
 
@@ -299,11 +340,47 @@ impl<T> Drop for Node<T> {
     }
 }
 
+pub struct DrainItems<T> {
+    items: *mut [T],
+}
+
+impl<T> Iterator for DrainItems<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        assert!(!self.items.is_null());
+        let items = unsafe { &mut *self.items };
+
+        if items.is_empty() { return None }
+
+        let val = unsafe { ptr::read(&items[0]) };
+        self.items = &mut items[1..];
+        Some(val)
+    }
+}
+
 fn get_median(distances: &Distances) -> u64 {
     // get the median distance
     let mut dists_clone = *distances;
     dists_clone.sort();
     dists_clone[NODE_SIZE as usize / 2]
+}
+
+/// Remove the item at `idx`, returning it and rotating all the items after it down.
+///
+/// After this returns, the last item in the slice is uninitialized.
+///
+/// ### Safety
+/// Can cause a double-drop if used on a slice of `Drop` elements
+unsafe fn shift_remove<T>(slice: &mut [T], idx: usize) -> T {
+    if idx + 1 == slice.len() {
+        return ptr::read(&slice[idx]);
+    }
+
+    let len = slice.len() - (idx + 1);
+    let val = ptr::read(&slice[idx]);
+    ptr::copy(&slice[idx + 1], &mut slice[idx], len);
+    val
 }
 
 #[test]
@@ -359,4 +436,28 @@ fn test_make_internal_add_parent() {
         node.far_right_child().items(),
         &[0, 1]
     )
+}
+
+#[test]
+fn test_shift_remove() {
+    let mut items = [0, 1, 2, 3, 4];
+    assert_eq!(unsafe { shift_remove(&mut items, 0) }, 0);
+    assert_eq!(items, [1, 2, 3, 4, 4]);
+
+    let mut items = [0, 1, 2, 3, 4];
+    assert_eq!(unsafe { shift_remove(&mut items, 1) }, 1);
+    assert_eq!(items, [0, 2, 3, 4, 4]);
+
+    let mut items = [0, 1, 2, 3, 4];
+    assert_eq!(unsafe { shift_remove(&mut items, 2) }, 2);
+    assert_eq!(items, [0, 1, 3, 4, 4]);
+
+    let mut items = [0, 1, 2, 3, 4];
+    assert_eq!(unsafe { shift_remove(&mut items, 3) }, 3);
+    assert_eq!(items, [0, 1, 2, 4, 4]);
+
+    let mut items = [0, 1, 2, 3, 4];
+    assert_eq!(unsafe { shift_remove(&mut items, 4) }, 4);
+    // last item is uninitialized even though it equals the same
+    assert_eq!(items, [0, 1, 2, 3, 4]);
 }

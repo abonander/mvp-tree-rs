@@ -96,12 +96,11 @@ use node::{Node, NODE_SIZE};
 /// [img_hash]: https://crates.io/crates/img_hash
 /// [kNN]: https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm
 /// [Euclidean metric]: https://en.wikipedia.org/wiki/Euclidean_distance
-pub struct MvpTree<T, Df> {
+pub struct MvpTree<T, Df = fn(&T, &T) -> u64> {
     // must be boxed so it has a stable address
     root: Option<Box<Node<T>>>,
     dist_fn: Df,
     len: usize,
-    height: usize,
 }
 
 impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
@@ -113,20 +112,12 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
             root: None,
             dist_fn,
             len: 0,
-            height: 0,
         }
     }
 
     /// The number of items in this tree.
     pub fn len(&self) -> usize {
         self.len
-    }
-
-    /// The current maximum height of the tree.
-    ///
-    /// This is roughly proportional to the maximum time it takes to access a node in the tree.
-    pub fn height(&self) -> usize {
-        self.height
     }
 
     /// Insert `item` into the tree based on the distance function provided at construction.
@@ -139,52 +130,15 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
             let mut root = Node::new_box();
             root.push_item(item);
             self.root = Some(root);
-            self.height = 1;
             self.len = 1;
             return;
-        }
-
-        /// Find the node where `item` belongs and insert it there
-        fn find_insert<T, Df>(node: &mut Node<T>, item: T, dist_fn: Df, depth: usize) -> usize
-        where Df: Fn(&T, &T) -> u64 {
-            if node.is_leaf() && !node.is_full() {
-                // if the target node is a non-full leaf node, just push the item
-                node.push_item(item);
-                return depth;
-            }
-
-            let distances = node.get_distances(&item, &dist_fn);
-
-            if node.is_leaf() { // && node.is_full()
-                // safe because we're not modifying the tree at any other point
-                if let Some((parent, NODE_SIZE)) = unsafe { node.parent_mut_and_idx() } {
-                    if !parent.is_full() {
-                        // we are the far right leaf child of a non-full parent
-                        parent.add_child(item, &distances);
-                        return depth;
-                    }
-                }
-
-                // make the node internal, increasing the depth by 1
-                node.make_internal(item, &distances);
-                return depth + 1;
-            }
-
-            if let Some(child_idx) = node.find_parent(&distances) {
-                // recurse into the appropriate child
-                return find_insert(node.child_mut(child_idx), item, dist_fn, depth + 1);
-            }
-
-            find_insert(node.far_right_child_mut(), item, dist_fn, depth + 1)
         }
 
         let new_len = self.len.checked_add(1).expect("overflow `self.len + 1`");
 
         let node = &mut **self.root.as_mut().unwrap();
-        let insert_depth = find_insert(node, item, &self.dist_fn, 0);
+        find_insert(node, item, &self.dist_fn);
 
-        // update the height if it increased
-        self.height = cmp::max(self.height, insert_depth + 1);
         self.len = new_len;
     }
 
@@ -219,6 +173,31 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         visitor.neighbors.into_sorted_vec()
     }
 
+    /// Remove the first item equal to the passed value from the tree.
+    ///
+    /// Returns the item, if it was found in the tree and removed.
+    ///
+    /// ### Performance
+    /// Removing items in an `MvpTree` isn't as simple as a binary or b-tree.
+    /// If the item is in an interior node it can't simply be replaced with its next child in-order;
+    /// all its child elements need to be reorganized into the remaining subtrees.
+    pub fn remove(&mut self, item: &T) -> Option<T> where T: Eq {
+        let (mut node, idx) = find_mut(self.root.as_mut()?, &self.dist_fn)?;
+        let (val, child) = node.remove(idx);
+
+        // Reinsert all child nodes, we can possibly optimize this but this is at least correct
+        if !child.is_null() {
+            for item in unsafe { IntoIter::from_owned_ptr(child) } {
+                // all items from the child belong somewhere in this node or its children
+                find_insert(node, item, &self.dist_fn);
+            }
+        }
+
+        self.len -= 1;
+
+        Some(val)
+    }
+
     /// Get an iterator that returns immutable references to items in this tree.
     ///
     /// The iteration order is unspecified but deterministic.
@@ -250,7 +229,60 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
             _borrow: PhantomData,
         }
     }
+
+    /// Consume this tree, getting an iterator that yields owned values.
+    ///
+    /// The iteration order is unspecified but deterministic.
+    pub fn into_iter(mut self) -> IntoIter<T> {
+        let dfs = DepthFirst::new(&self.root);
+        IntoIter {
+            root: self.root.take(),
+            dfs,
+            items: None,
+        }
+    }
 }
+
+/// Find the node where `item` belongs and insert it there
+fn find_insert<T, Df>(node: &mut Node<T>, item: T, dist_fn: Df)
+    where Df: Fn(&T, &T) -> u64 {
+    if node.is_leaf() && !node.is_full() {
+        // if the target node is a non-full leaf node, just push the item
+        node.push_item(item);
+        return;
+    }
+
+    let distances = node.get_distances(&item, &dist_fn);
+
+    if node.is_leaf() { // && node.is_full()
+        // safe because we're not modifying the tree at any other point
+        if let Some((parent, NODE_SIZE)) = unsafe { node.parent_mut_and_idx() } {
+            if !parent.is_full() {
+                // we are the far right leaf child of a non-full parent
+                parent.add_child(item, &distances);
+                return;
+            }
+        }
+
+        // make the node internal, increasing the depth by 1
+        node.make_internal(item, &distances);
+        return;
+    }
+
+    if let Some(child_idx) = node.find_parent(&distances) {
+        // recurse into the appropriate child
+        find_insert(node.child_mut(child_idx), item, dist_fn);
+        return;
+    }
+
+    find_insert(node.far_right_child_mut(), item, dist_fn);
+}
+
+fn find_mut<T, Df>(node: &mut Node<T>, dist_fn: Df) -> Option<(&mut Node<T>, usize)>
+where Df: Fn(&T, &T) -> u64 {
+    unimplemented!()
+}
+
 
 impl<T, Df> Extend<T> for MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     fn extend<I: IntoIterator<Item=T>>(&mut self, iter: I) {
@@ -264,7 +296,6 @@ impl<T: fmt::Debug, Df> fmt::Debug for MvpTree<T, Df> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("MvpTree")
             .field("len", &self.len)
-            .field("height", &self.height)
             .field("root", &self.root)
             .finish()
     }
@@ -366,6 +397,59 @@ impl<'a, T: 'a> Iterator for IterMut<'a, T> {
     }
 }
 
+/// Consuming iterator for `MvpTree`.
+///
+/// The iteration order is unspecified but deterministic.
+pub struct IntoIter<T> {
+    root: Option<Box<Node<T>>>,
+    dfs: DepthFirst<T>,
+    // 'static lifetime is okay since we own the root node now
+    items: Option<node::DrainItems<T>>,
+}
+
+impl<T> IntoIter<T> {
+    unsafe fn from_owned_ptr(node: *mut Node<T>) -> Self {
+        assert!(!node.is_null());
+        let root = Some(Box::from_raw(node));
+
+        IntoIter {
+            root,
+            dfs: DepthFirst::from_ptr(node),
+            items: None,
+        }
+    }
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        loop {
+            if let Some(next) = self.items.as_mut().and_then(|i| i.next()) {
+                return Some(next);
+            }
+
+            unsafe {
+                let next_node = self.dfs.next() as *mut Node<T>;
+
+                if next_node.is_null() {
+                    // eagerly free the root
+                    self.root = None;
+                    return None;
+                } else {
+                    self.items = Some((*next_node).drain_items());
+                }
+            }
+        }
+    }
+}
+
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        for _ in self {}
+    }
+}
+
 struct DepthFirst<T> {
     // NULLABLE
     node: *const Node<T>,
@@ -374,8 +458,12 @@ struct DepthFirst<T> {
 
 impl<T> DepthFirst<T> {
     fn new(root: &Option<Box<Node<T>>>) -> Self {
+        Self::from_ptr(root.as_ref().map_or(ptr::null(), |r| &**r))
+    }
+
+    fn from_ptr(node: *const Node<T>) -> Self {
         DepthFirst {
-            node: root.as_ref().map_or(ptr::null(), |r| &**r),
+            node,
             descend: true,
         }
     }
@@ -555,7 +643,6 @@ fn empty_tree() {
     let mut tree = MvpTree::new(compare);
 
     assert_eq!(tree.len(), 0);
-    assert_eq!(tree.height(), 0);
     assert_eq!(tree.iter().collect::<Vec<_>>(), Vec::<&u64>::new());
     assert_eq!(tree.iter_mut().collect::<Vec<_>>(), Vec::<&u64>::new());
 }
@@ -567,7 +654,6 @@ fn one_level() {
     tree.extend(0 .. NODE_SIZE as u64);
 
     assert_eq!(tree.len(), NODE_SIZE);
-    assert_eq!(tree.height(), 1);
 
     assert_eq!(
         tree.iter().cloned().collect::<Vec<_>>(),
@@ -598,7 +684,6 @@ fn two_levels() {
     for &val in vals.iter() { tree.insert(val) }
 
     assert_eq!(tree.len(), 35);
-    assert_eq!(tree.height(), 2);
 
     let root = tree.root.as_ref().unwrap();
     assert_eq!(root.items(), &[5, 16, 27, 38, 49]);
@@ -712,6 +797,33 @@ fn test_iter_mut() {
 
     for val in tree.iter_mut() {
         assert!(set.remove(&val), "val returned multiple times from iterator: {}", val);
+    }
+}
+
+#[test]
+fn test_into_iter() {
+    struct DropCanary {
+        item: u64,
+        dropped: bool
+    }
+
+    impl Drop for DropCanary {
+        fn drop(&mut self) {
+            assert!(!self.dropped, "item dropped twice: {}", self.item);
+            self.dropped = true;
+        }
+    }
+
+    use std::collections::HashSet;
+
+    let len = 100;
+
+    let mut tree = MvpTree::new(|l: &DropCanary, r| compare(&l.item, &r.item));
+    tree.extend((0 .. len).map(|item| DropCanary { item, dropped: false }));
+    let mut set = (0 .. len).collect::<HashSet<u64>>();
+
+    for val in tree.into_iter() {
+        assert!(set.remove(&val.item), "val returned multiple times from iterator: {}", val.item);
     }
 }
 
