@@ -1,10 +1,45 @@
 //! A n-ary tree which organizes items based on a distance metric.
+//!
+//! See the eponymous [`MvpTree`](::MvpTree) for more info.
+//!
+//! ### Limited API Release
+//! This first release contains a primitive and sometimes inefficient API as a proof-of-concept
+//! and to limit the surface area for bugs and incorrectness.
+//!
+//! Distance functions have to be manually defined, k-nearest-neighbor searches and removals require
+//! traversing from root even if the reference item is in the tree, and removal of an interior item
+//! removes and reinserts its entire left subtree item-by-item from the modified node for simplicity
+//! and correctness.
+//!
+//! Expect the API to change significantly in the next release, though some existing methods
+//! may remain.
 #![deny(missing_docs)]
 
 use std::cmp::{self, Ordering};
 use std::collections::BinaryHeap;
 use std::marker::PhantomData;
-use std::{fmt, ptr, slice};
+use std::ptr::{self, NonNull};
+use std::{fmt, slice};
+
+// MAINTAINER NOTE: all raw pointers are to be assumed nullable unless wrapped in `NonNull`.
+// Use the following macro to unwrap instead of raw derefs
+
+/// Unsafely unwrap a pointer to a reference or `Box`, asserting it is not null
+// macro so we get the real lines
+macro_rules! unwrap_ptr (
+    ($ptr:expr) => {{
+        assert!(!$ptr.is_null(), "pointer is null");
+        (&*$ptr)
+    }};
+    (mut $ptr:expr) => {{
+        assert!(!$ptr.is_null(), "pointer is null");
+        (&mut *$ptr)
+    }};
+    (Box $ptr:expr) => {{
+        assert!(!$ptr.is_null(), "pointer is null");
+        Box::from_raw($ptr)
+    }}
+);
 
 mod node;
 
@@ -142,6 +177,15 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
         self.len = new_len;
     }
 
+    /// Check if `item` is contained in the tree.
+    ///
+    /// This searches the tree using the given distance function and then tests equality
+    /// of 0-distance items. Since equal items may exist in the tree, this returns
+    /// once the first one is found.
+    pub fn contains(&self, item: &T) -> bool where T: Eq {
+        unimplemented!()
+    }
+
     /// Search the tree for the `k` closest items to the given item, based
     /// on the distance function the tree was constructed with.
     ///
@@ -180,7 +224,8 @@ impl<T, Df> MvpTree<T, Df> where Df: Fn(&T, &T) -> u64 {
     /// ### Performance
     /// Removing items in an `MvpTree` isn't as simple as a binary or b-tree.
     /// If the item is in an interior node it can't simply be replaced with its next child in-order;
-    /// all its child elements need to be reorganized into the remaining subtrees.
+    /// all its child elements need to be reorganized into the remaining subtrees, an `O(log(n))`
+    /// operation where `n` is the number of child elements.
     pub fn remove(&mut self, item: &T) -> Option<T> where T: Eq {
         let (mut node, idx) = find_mut(self.root.as_mut()?, &self.dist_fn)?;
         let (val, child) = node.remove(idx);
@@ -712,6 +757,15 @@ fn two_levels() {
     let child_5 = root.far_right_child();
     assert_eq!(child_5.items(), &[55, 56, 57, 58, 59]);
     assert!(child_5.is_leaf());
+}
+
+#[test]
+fn test_remove() {
+    let mut tree = MvpTree::new(compare);
+    tree.extend(0 .. 100);
+
+    assert_eq!(tree.remove(&50), Some(50));
+    assert!(!tree.iter().any(|i| *i == 50));
 }
 
 #[test]

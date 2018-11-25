@@ -12,18 +12,20 @@ pub type NodeArray<T> = [T; NODE_SIZE];
 pub type ChildArray<T> = [*mut Node<T>; CHILD_SIZE];
 pub type Distances = NodeArray<u64>;
 
-// FIXME: replace with a smaller atomic type when stable
-type AtomicBitSet = AtomicUsize;
+// MAINTAINER NOTE: all raw pointers are to be assumed nullable unless otherwise specified.
+// Raw pointer accesses should be done by `[.as_ref(), .as_mut()].unwrap()` instead of direct derefs
+// to catch any errors.
 
 pub struct Node<T> {
     /// valid up to `len`
     items: ManuallyDrop<NodeArray<T>>,
     len: u8,
     is_leaf: bool,
-    /// if `!is_leaf`, `0 .. len` and `NODE_SIZE` indices are initialized
+    /// if `!is_leaf`, `0 .. len` and `NODE_SIZE` indices are valid pointers
     children: ChildArray<T>,
     /// valid up to `len` if `!is_leaf`
     radii: Distances,
+    /// NULLABLE
     parent: *const Node<T>,
     /// the index of this node in its parent, if applicable
     child_idx: u8,
@@ -83,11 +85,11 @@ impl<T> Node<T> {
             // safe because we only read each item once
             let item = unsafe { ptr::read(&self.items[i]) };
 
-            // we just initialized these indices
             if distances[i] <= radius {
-                unsafe { (*self.children[0]).push_item(item); }
+                // we just initialized these indices
+                unsafe { unwrap_ptr!(mut self.children[0]).push_item(item); }
             } else {
-                unsafe { (*self.children[NODE_SIZE]).push_item(item); }
+                unsafe { unwrap_ptr!(mut self.children[NODE_SIZE]).push_item(item); }
             }
         }
 
@@ -112,8 +114,8 @@ impl<T> Node<T> {
 
         unsafe {
             // both `self.children[len]` and `self.children[NODE_SIZE]` are valid
-            (*self.children[NODE_SIZE])
-                .drain_less_than(radius, child_distances, &mut *self.children[len]);
+            unwrap_ptr!(mut self.children[NODE_SIZE])
+                .drain_less_than(radius, child_distances, unwrap_ptr!(mut self.children[len]));
 
             // we just initialized `self.children[len]`
             self.unsafe_push_item(item);
@@ -160,23 +162,23 @@ impl<T> Node<T> {
     pub fn child(&self, idx: usize) -> &Node<T> {
         assert!(!self.is_leaf(), "attempting to get child of leaf node");
         assert!(idx < self.len(), "idx out of bounds {} ({})", idx, self.len());
-        unsafe { self.children[idx].as_ref().unwrap() }
+        unsafe { unwrap_ptr!(self.children[idx]) }
     }
 
     pub fn child_mut(&mut self, idx: usize) -> &mut Node<T> {
         assert!(!self.is_leaf(), "attempting to get child of leaf node");
         assert!(idx < self.len(), "idx out of bounds {} ({})", idx, self.len());
-        unsafe { self.children[idx].as_mut().unwrap() }
+        unsafe { unwrap_ptr!(mut self.children[idx]) }
     }
     
     pub fn far_right_child(&self) -> &Node<T> {
         assert!(!self.is_leaf(), "attempting to get far right child of leaf node");
-        unsafe { self.children[NODE_SIZE].as_ref().unwrap() }
+        unsafe { unwrap_ptr!(self.children[NODE_SIZE]) }
     }
 
     pub fn far_right_child_mut(&mut self) -> &mut Node<T> {
         assert!(!self.is_leaf(), "attempting to get far right child of leaf node");
-        unsafe { self.children[NODE_SIZE].as_mut().unwrap() }
+        unsafe { unwrap_ptr!(mut self.children[NODE_SIZE]) }
     }
 
     /// Remove `idx` from the node, returning it and its left child if this is not a leaf node,
@@ -208,21 +210,14 @@ impl<T> Node<T> {
     /// # Safety
     /// Must ensure parent isn't being modified
     pub unsafe fn parent_and_idx(&self) -> Option<(&Node<T>, usize)> {
-        if self.parent.is_null() {
-            None
-        } else {
-            Some((&*self.parent, self.child_idx as usize))
-        }
+        self.parent.as_ref().map(|p| (p, self.child_idx as usize))
     }
 
     /// # Safety
     /// Must ensure parent isn't being modified
     pub unsafe fn parent_mut_and_idx(&mut self) -> Option<(&mut Node<T>, usize)> {
-        if self.parent.is_null() {
-            None
-        } else {
-            Some((&mut *(self.parent as *mut _), self.child_idx as usize))
-        }
+        let child_idx = self.child_idx as usize;
+        (self.parent as *mut Node<T>).as_mut().map(|p| (p, child_idx))
     }
 
     pub unsafe fn parent_mut(&mut self) -> &mut Node<T> {
@@ -264,12 +259,12 @@ impl<T> Node<T> {
 
             for idx in (0 .. len).chain(Some(NODE_SIZE)) {
                 {
-                    let child = unsafe { &*self.children[idx] };
+                    let child = unsafe { unwrap_ptr!(self.children[idx]) };
                     assert_eq!(child.len(), 0, "draining items with nonempty children");
                 }
 
-                unsafe { drop(Box::from_raw(self.children[idx])); }
-                // as a check to ensure further access/drops will segfault
+                unsafe { drop(unwrap_ptr!(self.children[idx])); }
+                // as a check to ensure further access/drops will panic/segfault
                 self.children[idx] = ptr::null_mut();
             }
         }
@@ -306,7 +301,7 @@ impl<'a, T: fmt::Debug> fmt::Debug for DebugChildren<'a, T> {
             .chain(self.children.last())
             // INVARIANT:
             // if we have safe access to this node then we have shared access to the children
-            .map(|c| unsafe { &**c });
+            .map(|&c| unsafe { unwrap_ptr!(c) });
 
         f.debug_list().entries(children_iter).finish()
     }
@@ -327,7 +322,7 @@ impl<T> Drop for Node<T> {
 
             for &child in self.children[..len].iter().chain(self.children.last()) {
                 unsafe {
-                    drop(Box::from_raw(child));
+                    drop(unwrap_ptr!(Box child));
                 }
             }
         }
